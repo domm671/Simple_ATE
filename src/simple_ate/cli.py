@@ -97,7 +97,21 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--sn", required=True, help="产品序列号")
     pr.add_argument("--config", default="config/station.toml", help="工位配置路径")
     pr.set_defaults(func=_cmd_run)
+
+    pg = sub.add_parser("gui", help="启动 PySide6 图形界面")
+    pg.add_argument("--config", default="config/station.toml", help="工位配置路径")
+    pg.set_defaults(func=_cmd_gui)
     return p
+
+
+def _cmd_gui(args) -> int:
+    try:
+        from .ui.app import main as gui_main
+    except ImportError:
+        print("未安装 PySide6。请先安装 GUI 依赖：pip install -e .[gui]",
+              file=sys.stderr)
+        return 2
+    return gui_main(["--config", args.config])
 
 
 def main(argv: list[str] | None = None) -> int:

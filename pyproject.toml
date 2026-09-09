@@ -9,8 +9,12 @@ description = "Simple ATE/FT test runner (declarative CAN frame scripts)"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+gui = ["PySide6>=6.5"]
+
 [project.scripts]
 simple-ate = "simple_ate.cli:main"
+simple-ate-gui = "simple_ate.ui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

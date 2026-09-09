@@ -4,13 +4,18 @@
 同步执行引擎 + JSON 结果存储。引擎不依赖 Qt，UI 在后续里程碑接入。
 
 - Python ≥ 3.11（开发环境 3.13.2）
-- 运行期零第三方依赖（标准库）；测试使用内置 `unittest`
+- 无头引擎零第三方依赖（标准库）；测试使用内置 `unittest`
+- 界面（M2）使用可选依赖 PySide6
 - 真实 CAN（M3）通过可选依赖 `python-can` 接入
 
 ## 安装（开发模式）
 
 ```bat
+:: 仅无头引擎/Mock
 pip install -e .
+
+:: 含 PySide6 界面
+pip install -e .[gui]
 ```
 
 或不安装，直接设置源码路径：
@@ -27,6 +32,18 @@ python -m simple_ate run scripts/bms_ft.xml --sn BMS20260909001 --config config/
 
 进程退出码：`PASS=0`、`FAIL=1`、`ERROR=2`、`ABORT=3`。
 
+## 启动图形界面（M2）
+
+```bat
+simple-ate-gui --config config/station.toml
+:: 或
+python -m simple_ate gui --config config/station.toml
+```
+
+单窗口五区域：脚本选择、SN 扫码输入（回车启动，受 `sn.auto_start` 控制）、
+Start/Stop/Reset、逐项进度表、结果大字（PASS 绿 / FAIL 红 / ERROR 黄 / ABORT 灰）与日志区。
+引擎在独立 QThread 运行，事件经 Qt 信号回主线程刷新；界面不直接接触通信层。
+
 产物：
 
 - `data/results/uploaded/*.json`：每步即时落盘的完整 Run 结果（MES 禁用时直接归档 uploaded）
@@ -36,6 +53,8 @@ python -m simple_ate run scripts/bms_ft.xml --sn BMS20260909001 --config config/
 ## 运行测试
 
 ```bat
+:: 全部（含 UI，自动使用 offscreen 平台）
+set QT_QPA_PLATFORM=offscreen
 python -m unittest discover -s tests -v
 ```
 
@@ -53,6 +72,7 @@ src/simple_ate/
   communication/     base 抽象、mock（JSON 应答）、can（python-can，M3）、serial（占位）
   storage/           ResultStore 协议 + FileResultStore（JSON + Outbox 目录）
   mes/               MesUploader 协议 + NullUploader（M4 实现上传）
+  ui/                PySide6 界面（M2）：engine_bridge / worker(QThread) / main_window
 scripts/             测试脚本示例（XML）
 config/              station.toml 与 mock 应答脚本
 extensions/          可选自定义 action（示例 sample_ext.py）
