@@ -1,6 +1,6 @@
 # Simple_ATE
 
-一个尽量简洁的产线自动测试（ATE）框架（未完成，仍在开发中）。v0.1：XML 测试脚本 + 内建 CAN 帧收发原语 +
+一个尽量简洁的产线自动测试（ATE）软件（未完成，仍在开发中）。v0.1：XML 测试脚本 + 内建 CAN 帧收发原语 +
 同步执行引擎 + JSON 结果存储。引擎不依赖 Qt，UI 在后续里程碑接入。
 
 - Python ≥ 3.11（开发环境 3.13.2）
@@ -73,7 +73,7 @@ src/simple_ate/
   storage/           ResultStore 协议 + FileResultStore（JSON + Outbox 目录）
   mes/               MesUploader 协议 + NullUploader（M4 实现上传）
   ui/                PySide6 界面（M2）：engine_bridge / worker(QThread) / main_window
-scripts/             测试脚本示例（XML）
+scripts/             测试脚本（XML）
 config/              station.toml 与 mock 应答脚本
 extensions/          可选自定义 action（示例 sample_ext.py）
 tests/               单元测试
