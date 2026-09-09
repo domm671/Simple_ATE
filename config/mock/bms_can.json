@@ -1,0 +1,42 @@
+{
+  "default_timeout": 0.5,
+  "rules": [
+    {
+      "request_id": "0x18FF50E5",
+      "request_data": "01 00",
+      "ext": true,
+      "response_id": "0x18FF50E6",
+      "response_data": "01 00"
+    },
+    {
+      "request_id": "0x18FF50E5",
+      "request_data": "02 01 00",
+      "ext": true,
+      "response_computed": {
+        "id": "0x18FF50E6",
+        "ext": true,
+        "bytes": "B3 04 00 00 00 00 00 00"
+      }
+    },
+    {
+      "request_id": "0x18FF50E5",
+      "request_data": "03 02",
+      "ext": true,
+      "response_computed": {
+        "id": "0x18FF50E6",
+        "ext": true,
+        "bytes": "B8 0B 00 00 00 00 00 00"
+      }
+    },
+    {
+      "request_id": "0x18FF50E5",
+      "request_data": "10 01",
+      "ext": true,
+      "response_computed": {
+        "id": "0x18FF50E6",
+        "ext": true,
+        "bytes": "01 00 00 00 00 00 00 00"
+      }
+    }
+  ]
+}

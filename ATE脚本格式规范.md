@@ -198,12 +198,12 @@ byte-token  = hex-byte | variable-ref ;       # data 中每个 token 占一个�
 | `ext` | 否 | bool | `false` | 期望帧的 ID 类型，须与总线上的帧一致 |
 | `id_mask` | 否 | CAN ID | 精确匹配 | 匹配掩码：`(recv_id & id_mask) == (id & id_mask)` 即命中 |
 | `timeout` | 否 | 秒(float>0) | 取 step 的 `timeout` | 本次等待的时限 |
-| `drain` | 否 | 枚举 | `before` | `before`：等待前清空接收缓冲；`off`：不清空（可等到更早到达的帧） |
+| `drain` | 否 | 枚举 | `before` | `before`：在与之配对的 `<send>` 发送**之前**清空接收缓冲；`off`：不清空（可等到更早到达的帧） |
 | `min_len` | 否 | int(0–8) | 0 | 应答帧最小数据长度；收到的帧不足视为无效帧继续等 |
 
 语义：
 
-1. `drain="before"`（默认）先排空接收队列，避免收到上一交互的残留帧；
+1. `drain="before"`（默认）在**发送请求帧之前**先排空接收队列，避免收到上一交互的残留帧（注意是发送前而非接收后，这样同步实现下 send 立即产生的应答不会被误删）；独立 `<wait>`（前面没有配对 send）则在等待开始时清空；
 2. 在剩余 timeout 内循环接收，按 ID 类型 + ID（+mask）匹配，**无关帧丢弃但全部写 trace**；
 3. 命中但长度不足 `min_len`：丢弃并继续等；
 4. 超时未收到有效帧 → 通信异常 E301，触发 retry；
@@ -417,16 +417,15 @@ def enter_extended_session(ctx, resource, **params):
 | E202 | 扩展模块或 handler 函数不存在 |
 | E204 | 资源未在工位配置中定义 |
 | E208 | 变量在定义之前被引用 / 未定义 |
-| E210 | 同时打开多个资源但 step 未指定 `resource`（或指定了未连接的资源） |
+| E210 | 资源连接/使用错误：同时打开多个资源但 step 未指定 `resource`、指定了未连接资源、重复 connect、disconnect 未连接资源 |
 
 ### 10.2 运行期
 
 | 码 | 含义 |
 |---|---|
-| E301 | 应答超时（含 ID/掩码未命中、min_len 不足） |
+| E301 | 应答超时（含 ID/掩码未命中、min_len 不足、等待被停止中断） |
 | E302 | 通信链路异常（掉线、发送失败） |
 | E303 | 引擎/扩展未预期异常（堆栈写运行日志） |
-| E304 | 同一资源重复 connect |
 | E305 | field 提取超出实际帧长度 |
 | E306 | 扩展 action 抛出异常 |
 | E307 | send data 变量运行期值不是 0–255 的整数 |

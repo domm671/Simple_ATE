@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  产品：BMS 主控板终检（M1 Mock 冒烟）
+  协议：扩展帧自定义 CAN，请求 0x18FF50E5 / 应答 0x18FF50E6
+  变更：1.0 初版
+-->
+<test name="BMS_FT" version="1.0">
+
+    <connect resource="can_main" timeout="3"/>
+
+    <!-- 通信自检 -->
+    <step name="CAN_COMM" timeout="2" retry="2" retry_interval="0.1" on_fail="abort">
+        <send id="0x18FF50E5" ext="true" data="01 00"/>
+        <wait id="0x18FF50E6" ext="true"/>
+    </step>
+
+    <!-- 电压：小端 2 字节，0.01V/LSB，12.03V -> 1203 = 0x04B3 -->
+    <step name="Voltage" timeout="2" on_fail="continue">
+        <send id="0x18FF50E5" ext="true" data="02 01 00"/>
+        <wait id="0x18FF50E6" ext="true">
+            <field var="vbat" offset="0" length="2" endian="little" gain="0.01" unit="V"/>
+        </wait>
+        <limit value="${vbat}" min="11.5" max="12.5" unit="V"/>
+    </step>
+
+    <!-- 休眠电流：小端 4 字节，0.1uA/LSB，300uA -> 3000 = 0x0BB8 -->
+    <step name="SleepCurrent" timeout="2" on_fail="continue">
+        <send id="0x18FF50E5" ext="true" data="03 02"/>
+        <wait id="0x18FF50E6" ext="true">
+            <field var="i_sleep" offset="0" length="4" endian="little" gain="0.1" unit="uA"/>
+        </wait>
+        <limit value="${i_sleep}" max="1000" unit="uA"/>
+    </step>
+
+    <!-- 继电器反馈状态码 -->
+    <step name="RelayCheck" timeout="2" retry="1" on_fail="abort">
+        <send id="0x18FF50E5" ext="true" data="10 01"/>
+        <wait id="0x18FF50E6" ext="true">
+            <field var="relay_st" offset="0" length="1"/>
+        </wait>
+        <limit value="${relay_st}" eq="1"/>
+    </step>
+
+    <disconnect resource="can_main"/>
+
+</test>

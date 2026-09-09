@@ -1,0 +1,27 @@
+# simple_ATE 工位配置（示例）
+station_id = "FT_LINE1_ST03"
+software_version = "0.1.0"
+
+[sn]
+pattern = "^BMS[0-9]{11}$"
+auto_start = true
+
+[storage]
+sink = "file"
+result_dir = "../data/results"
+log_dir = "../data/logs"
+trace_retain_days = 30
+
+# M1 使用 mock；真机联调（M3）时改为 type="can" 并填写 interface/channel
+[resources.can_main]
+type = "mock"
+mock_script = "mock/bms_can.json"
+# type="can" 时使用：
+# interface = "pcan"
+# channel = "PCAN_USBBUS1"
+# bitrate = 500000
+
+# 可选自定义 action 白名单（模块相对 extensions/ 目录）
+[extensions]
+dir = "../extensions"
+allowed = ["sample_ext"]
