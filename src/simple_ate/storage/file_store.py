@@ -7,7 +7,7 @@
       uploaded/...                  已上传或无需上传
       failed/...                    超过最大重试（M4 处理）
 
-每步完成即整体覆写落盘并 flush，崩溃残留（无 result 字段）在下次扫描时标记 ABORT。
+每步完成即整体覆写保存并 flush，崩溃残留（无 result 字段）在下次扫描时标记 ABORT。
 """
 
 from __future__ import annotations

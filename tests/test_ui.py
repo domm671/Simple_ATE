@@ -101,7 +101,7 @@ class TestMainWindow(unittest.TestCase):
         # 每行结果文字以 PASS 结尾
         for r in range(4):
             self.assertTrue(self.win.table.item(r, 5).text().startswith("PASS"))
-        # 结果文件已落盘
+        # 结果文件已保存
         files = list((self.result_dir / "uploaded").glob("BMS20260909001_*.json"))
         self.assertEqual(len(files), 1)
         # 结束后 SN 框清空并聚焦，便于下一次扫码

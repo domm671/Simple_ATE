@@ -385,7 +385,7 @@ class ScriptEditorDialog(QDialog):
     def _sync_graph_to_text(self) -> None:
         if self.root is None:
             return
-        self._apply_form_to_element()           # 属性表单可能有未落盘编辑
+        self._apply_form_to_element()           # 属性表单可能有未保存编辑
         self.xml_edit.blockSignals(True)
         self.xml_edit.setPlainText(serialize(copy.deepcopy(self.root)))
         self.xml_edit.blockSignals(False)
@@ -546,7 +546,7 @@ class ScriptEditorDialog(QDialog):
 
     # ============================================================ 属性表单
     def _rebuild_form(self, el: ET.Element | None) -> None:
-        # 先把旧表单对旧元素的修改落盘（正常选择切换时旧表单仍显示旧值）
+        # 先把旧表单对旧元素的修改保存（正常选择切换时旧表单仍显示旧值）
         self._form_widgets = {}
         self.action_extra = None
 

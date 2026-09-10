@@ -1,4 +1,4 @@
-"""文件结果存储测试：同 SN 多 Run 不覆盖、增量落盘、崩溃恢复。"""
+"""文件结果存储测试：同 SN 多 Run 不覆盖、增量保存、崩溃恢复。"""
 
 import json
 import tempfile
