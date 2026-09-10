@@ -48,7 +48,18 @@ class TestMainWindow(unittest.TestCase):
         self.assertTrue(any(self.win.script_combo.itemText(i) == "bms_ft.xml"
                             for i in range(self.win.script_combo.count())))
 
+    def test_sn_not_validated_by_default(self):
+        # 默认 sn.validation_enabled=False：不做 pattern 校验，任意非空 SN 均有效
+        self.assertFalse(self.cfg.sn.validation_enabled)
+        self.assertTrue(self.win._sn_valid("bad-sn!!"))
+        self.assertTrue(self.win._sn_valid("BMS20260909001"))
+        # 仅空 SN 仍然不允许
+        self.assertFalse(self.win._sn_valid(""))
+
     def test_sn_validation_blocks_start(self):
+        # 使用方按需启用 pattern 校验
+        self.cfg.sn.validation_enabled = True
+        self.cfg.sn.pattern = r"^BMS[0-9]{11}$"
         self.win.sn_edit.setText("bad-sn!!")
         self.win._on_start()
         self.assertEqual(self.win.state, IDLE)
@@ -56,7 +67,9 @@ class TestMainWindow(unittest.TestCase):
         self.assertIsNone(self.win.worker)
 
     def test_valid_sn_pattern(self):
-        # 配置中 pattern = ^BMS[0-9]{11}$
+        # 启用校验后按 pattern = ^BMS[0-9]{11}$ 判定
+        self.cfg.sn.validation_enabled = True
+        self.cfg.sn.pattern = r"^BMS[0-9]{11}$"
         self.assertTrue(self.win._sn_valid("BMS20260909001"))
         self.assertFalse(self.win._sn_valid("X"))
 

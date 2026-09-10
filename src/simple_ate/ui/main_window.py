@@ -142,7 +142,7 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_sn_box(self) -> QWidget:
-        box = QGroupBox("产品序列号 SN（扫码枪输入后回车）")
+        box = QGroupBox("产品序列号 SN（手动输入或扫码枪输入后回车）")
         lay = QHBoxLayout(box)
         self.sn_edit = QLineEdit()
         self.sn_edit.setPlaceholderText("扫描或输入 SN…")
@@ -206,11 +206,22 @@ class MainWindow(QMainWindow):
         self.script_combo.setEnabled(not running)
 
     def _sn_valid(self, sn: str) -> bool:
+        # SN 默认不做 pattern 校验（sn.validation_enabled=false），仅要求非空；
+        # 校验逻辑保留，使用方在配置中启用 sn.validation_enabled 并设置 pattern 后生效。
+        if not sn:
+            return False
+        if not self.config.sn.validation_enabled:
+            return True
         pattern = self.config.sn.pattern
         try:
-            return bool(sn) and re.fullmatch(pattern, sn) is not None
+            return re.fullmatch(pattern, sn) is not None
         except re.error:
-            return bool(sn)
+            return True
+
+    def _sn_invalid_hint(self, sn: str) -> str:
+        if not sn:
+            return "SN 不能为空"
+        return f"SN 不符合规则：{self.config.sn.pattern}"
 
     def _on_sn_enter(self) -> None:
         """扫码枪回车：auto_start=true 时直接启动，否则仅校验并聚焦开始按钮。"""
@@ -224,7 +235,7 @@ class MainWindow(QMainWindow):
                 self.sn_hint.setText("")
                 self.btn_start.setFocus()
             else:
-                self.sn_hint.setText(f"SN 不符合规则：{self.config.sn.pattern}")
+                self.sn_hint.setText(self._sn_invalid_hint(sn))
 
     def _on_start(self) -> None:
         if self.state == RUNNING:
@@ -235,7 +246,7 @@ class MainWindow(QMainWindow):
             return
         sn = self.sn_edit.text().strip()
         if not self._sn_valid(sn):
-            self.sn_hint.setText(f"SN 不符合规则：{self.config.sn.pattern}")
+            self.sn_hint.setText(self._sn_invalid_hint(sn))
             self.sn_edit.setFocus()
             return
         self.sn_hint.setText("")

@@ -3,7 +3,10 @@ station_id = "FT_LINE1_ST03"
 software_version = "0.1.0"
 
 [sn]
-pattern = "^BMS[0-9]{11}$"
+# 默认不对 SN 做格式校验，任意非空 SN 均可启动测试。
+# 如需按工位规则校验，置 validation_enabled = true 并按实际产品序列号规则修改 pattern。
+validation_enabled = false
+# pattern = "^BMS[0-9]{11}$"   # 示例：BMS + 11 位数字
 auto_start = true
 
 [storage]

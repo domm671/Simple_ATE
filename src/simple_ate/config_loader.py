@@ -11,6 +11,8 @@ from .communication.base import ResourceConfig
 
 @dataclass
 class SnConfig:
+    # 默认不对 SN 做 pattern 校验；使用方有需要时置 validation_enabled=true 并配置 pattern
+    validation_enabled: bool = False
     pattern: str = ".*"
     auto_start: bool = True
 
@@ -60,6 +62,7 @@ def load_config(path: str | Path) -> StationConfig:
 
     if "sn" in raw:
         cfg.sn = SnConfig(
+            validation_enabled=raw["sn"].get("validation_enabled", False),
             pattern=raw["sn"].get("pattern", ".*"),
             auto_start=raw["sn"].get("auto_start", True),
         )
