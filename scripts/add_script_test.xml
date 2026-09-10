@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<test name="NEW_SCRIPT" version="1.0">
+    <connect resource="can_main" />
+    <step name="Step1" timeout="2" retry="1" on_fail="abort">
+        <send id="0x100" data="01" />
+        <wait id="0x101" />
+    </step>
+    <disconnect resource="can_main" />
+</test>

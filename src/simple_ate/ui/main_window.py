@@ -19,6 +19,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -139,6 +140,12 @@ class MainWindow(QMainWindow):
         btn_browse = QPushButton("打开其它…")
         btn_browse.clicked.connect(self._browse_script)
         lay.addWidget(btn_browse)
+        self.btn_edit_script = QPushButton("编辑脚本…")
+        self.btn_edit_script.clicked.connect(self._edit_current_script)
+        lay.addWidget(self.btn_edit_script)
+        self.btn_new_script = QPushButton("新建脚本…")
+        self.btn_new_script.clicked.connect(self._new_script)
+        lay.addWidget(self.btn_new_script)
         return box
 
     def _build_sn_box(self) -> QWidget:
@@ -196,6 +203,38 @@ class MainWindow(QMainWindow):
     def _current_script(self) -> str | None:
         return self.script_combo.currentData()
 
+    # ============================================================ 脚本编辑
+    def _open_editor(self, path: Path | None) -> None:
+        from .script_editor import ScriptEditorDialog
+
+        dlg = ScriptEditorDialog(self.config, path=path, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.saved_path is not None:
+            saved = dlg.saved_path
+            self._refresh_scripts()
+            self._select_script_in_combo(str(saved))
+
+    def _edit_current_script(self) -> None:
+        if self.state == RUNNING:
+            return
+        script = self._current_script()
+        if not script:
+            self._notify("请先选择要编辑的测试脚本。")
+            return
+        self._open_editor(Path(script))
+
+    def _new_script(self) -> None:
+        if self.state == RUNNING:
+            return
+        self._open_editor(None)
+
+    def _select_script_in_combo(self, path: str) -> None:
+        for i in range(self.script_combo.count()):
+            if self.script_combo.itemData(i) == path:
+                self.script_combo.setCurrentIndex(i)
+                return
+        self.script_combo.insertItem(0, Path(path).name, path)
+        self.script_combo.setCurrentIndex(0)
+
     # ============================================================ 状态控制
     def _set_state(self, state: str) -> None:
         self.state = state
@@ -204,6 +243,8 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(running)
         self.sn_edit.setEnabled(not running)
         self.script_combo.setEnabled(not running)
+        self.btn_edit_script.setEnabled(not running)
+        self.btn_new_script.setEnabled(not running)
 
     def _sn_valid(self, sn: str) -> bool:
         # SN 默认不做 pattern 校验（sn.validation_enabled=false），仅要求非空；

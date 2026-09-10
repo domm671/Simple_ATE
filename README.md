@@ -44,6 +44,15 @@ python -m simple_ate gui --config config/station.toml
 Start/Stop/Reset、逐项进度表、结果大字（PASS 绿 / FAIL 红 / ERROR 黄 / ABORT 灰）与日志区。
 引擎在独立 QThread 运行，事件经 Qt 信号回主线程刷新；界面不直接接触通信层。
 
+脚本栏除选择脚本外，还提供**脚本编辑器**（“新建脚本…”/“编辑脚本…”）：
+
+- **XML 编辑**：直接编写 Script XML 原文；
+- **图形化编辑**：树形结构增删/上下移节点（connect/step/send/wait/field/limit/action/delay），
+  右侧表单按标签类型编辑属性，无需记忆标签名；
+- 两个页签互相同步；保存前用正式解析器做完整静态校验（E1xx/E2xx，
+  错误码 + 行列 + 说明一次列出），校验不过不落盘。
+  注意：经图形页签往返会丢弃 XML 注释，需保留注释请在 XML 页签中修改。
+
 产物：
 
 - `data/results/uploaded/*.json`：每步即时落盘的完整 Run 结果（MES 禁用时直接归档 uploaded）
