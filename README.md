@@ -142,7 +142,7 @@ python -m unittest discover -s tests -v
 
 ```
 Simple_ATE/
-├─ src/simple_ate/
+├─ src/                         导入名 simple_ate（pyproject package-dir 映射）
 │  ├─ __main__.py / cli.py      python -m simple_ate 入口（run / gui 子命令）
 │  ├─ parser.py                 XML 脚本解析 + 全量静态校验（错误聚合，E1xx/E2xx）
 │  ├─ model.py                  脚本 / 语句 / 结果的 dataclass 模型
@@ -165,7 +165,7 @@ Simple_ATE/
 ├─ extensions/                  可选自定义 action 示例（sample_ext.py）
 ├─ tests/                       单元测试（unittest）
 ├─ data/                        运行产物（results / logs / trace，运行后生成）
-├─ pyproject.toml               架构、决策记录与里程碑
+├─ pyproject.toml               包配置（依赖、入口点、package-dir 映射）
 ├─ ATE脚本格式规范.md             Script XML 标签与属性完整规范
 ├─ LICENSE
 └─ README.md

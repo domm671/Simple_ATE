@@ -16,5 +16,16 @@ gui = ["PySide6>=6.5"]
 simple-ate = "simple_ate.cli:main"
 simple-ate-gui = "simple_ate.ui.app:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+# 物理代码直接放在 src/ 下（去掉了 src/simple_ate 这层目录），
+# 通过 package-dir 把导入名 simple_ate 映射到物理目录 src；
+# 子包按父包映射推导（simple_ate.ui -> src/ui）。
+# 因此 Python 导入路径仍为 simple_ate.xxx，包内相对导入与入口点均无需改动。
+[tool.setuptools]
+package-dir = {simple_ate = "src"}
+packages = [
+    "simple_ate",
+    "simple_ate.communication",
+    "simple_ate.storage",
+    "simple_ate.mes",
+    "simple_ate.ui",
+]
