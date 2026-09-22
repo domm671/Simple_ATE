@@ -130,8 +130,8 @@ python -m unittest discover -s tests -v
 | `tests/test_ui.py` | 主窗口、引擎桥接、信号刷新 |
 | `tests/test_script_editor.py` | 脚本编辑器双向同步 / 增删移节点 / 校验拦截 |
 
-> 若未安装 PySide6，UI 相关两个测试模块会因 `ModuleNotFoundError: PySide6`
-> 无法收集，安装 `pip install -e .[gui]` 后即可，不影响引擎部分测试。
+> 若未安装 PySide6，UI 相关 25 个测试会被**自动跳过（skipped）**而非报错，
+> 安装 `pip install -e .[gui]` 后即自动执行，不影响引擎部分测试。
 
 也可用 Mock 应答做一次端到端手工验证：先执行上文“无头模式跑一次测试”，
 再检查 `data/results/` 与 `data/logs/` 下的产物。
@@ -144,20 +144,32 @@ python -m unittest discover -s tests -v
 Simple_ATE/
 ├─ src/                         导入名 simple_ate（pyproject package-dir 映射）
 │  ├─ __main__.py / cli.py      python -m simple_ate 入口（run / gui 子命令）
-│  ├─ parser.py                 XML 脚本解析 + 全量静态校验（错误聚合，E1xx/E2xx）
-│  ├─ model.py                  脚本 / 语句 / 结果的 dataclass 模型
-│  ├─ engine.py                 顺序执行、retry/on_fail、停止标志、资源生命周期
-│  ├─ frame_io.py               send/wait/field 拼帧、ID/mask 匹配、字段提取
-│  ├─ judge.py                  limit 判定（min/max、eq）
-│  ├─ extension.py              <action handler="module:func"> 白名单加载
-│  ├─ context.py / errors.py    执行上下文 / 统一异常与错误码
 │  ├─ config_loader.py          station.toml 加载
-│  ├─ logging_conf.py           run log 与 CAN trace 日志配置
-│  ├─ communication/            base 抽象、mock（JSON 应答）、can（python-can，M3）、serial（占位）
-│  ├─ storage/                  ResultStore 协议 + FileResultStore（JSON + Outbox 目录）
-│  ├─ mes/                      MesUploader 协议 + NullUploader（M4 实现上传）
-│  └─ ui/                       PySide6 界面（M2）：app / main_window /
-│                               engine_bridge / worker(QThread) / script_editor
+│  ├─ errors.py                 统一异常体系与错误码（E1xx/E2xx/E3xx，被所有层引用）
+│  ├─ engine/                   脚本引擎包（不依赖 UI）
+│  │  ├─ README.md              本模块设计与运行说明
+│  │  ├─ parser.py              XML 脚本解析 + 全量静态校验（错误聚合，E1xx/E2xx）
+│  │  ├─ executor.py            顺序执行、retry/on_fail、停止标志、资源生命周期
+│  │  ├─ frame_io.py            send/wait/field 拼帧、ID/mask 匹配、字段提取
+│  │  ├─ judge.py               limit 判定（min/max、eq）
+│  │  ├─ extension.py           <action handler="module:func"> 白名单加载
+│  │  ├─ context.py             Run 级上下文（SN、变量表、资源句柄）
+│  │  └─ model.py               脚本 / 语句 / 结果的 dataclass 模型
+│  ├─ logging_conf/             日志配置包（横切模块）
+│  │  ├─ README.md              本模块设计与运行说明
+│  │  └─ logger.py              run log 与 CAN trace 配置
+│  ├─ communication/            通信层
+│  │  ├─ README.md              本模块设计与运行说明
+│  │  └─ base/mock/can/serial   抽象接口 / mock（JSON 应答）/ can（python-can，M3）/ serial（占位）
+│  ├─ storage/                  结果存储
+│  │  ├─ README.md              本模块设计与运行说明
+│  │  └─ base/file_store        ResultStore 协议 + FileResultStore（JSON + Outbox 目录）
+│  ├─ mes/                      MES 扩展点
+│  │  ├─ README.md              本模块设计与运行说明
+│  │  └─ base                   MesUploader 协议 + NullUploader（M4 实现上传）
+│  └─ ui/                       PySide6 界面（M2）
+│     ├─ README.md              本模块设计与运行说明
+│     └─ app / main_window / engine_bridge / worker(QThread) / script_editor
 ├─ scripts/                     测试脚本（XML），如 bms_ft.xml
 ├─ config/
 │  ├─ station.toml              工位配置（SN、存储、通信资源、扩展白名单）

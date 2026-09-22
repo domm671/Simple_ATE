@@ -8,7 +8,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from ..config_loader import StationConfig
 from ..engine import Engine
-from ..parser import ScriptParser
+from ..engine.parser import ScriptParser
 from ..storage.file_store import FileResultStore
 
 

@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .communication.base import Frame
+from ..communication.base import Frame
 
 _LOGGER_NAME = "simple_ate"
 

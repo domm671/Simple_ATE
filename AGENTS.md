@@ -22,7 +22,7 @@ Simple_ATE 是一个尽量小的产线自动测试（ATE/FT）执行软件，运
 
 ## 2. 技术栈与依赖纪律
 
-- **Python ≥ 3.11**（开发验证环境 3.13），扁平 src-layout：代码文件直接放在 `src/` 下（导入名仍是包 `simple_ate`，由 `pyproject.toml` 的 `tool.setuptools.package-dir` 把 `simple_ate` 映射到物理目录 `src`）。
+- **Python ≥ 3.11**（开发验证环境 3.13），src-layout：代码按架构子包组织在 `src/` 下（导入名仍是包 `simple_ate`，由 `pyproject.toml` 的 `tool.setuptools.package-dir` 把 `simple_ate` 映射到物理目录 `src`，子包按父包映射推导，如 `simple_ate.engine` → `src/engine`）。
 - 引擎核心**零第三方依赖**，全部使用标准库（`xml.etree.ElementTree`、`tomllib`、`dataclasses`、`importlib`、`logging`、`unittest` 等）。
 - 可选依赖：`gui = ["PySide6>=6.5"]`；真实 CAN 由使用方自行安装 `python-can`。
 - **新增依赖前先想能否用标准库解决**；任何新依赖都属于重要架构决策，需有充分理由并更新 `pyproject.toml` 与 `设计说明.md` 第 11 章。
@@ -64,7 +64,7 @@ set QT_QPA_PLATFORM=offscreen
 python -m unittest discover -s tests -v
 ```
 
-- 未安装 PySide6 时 `tests/test_ui.py`、`tests/test_script_editor.py` 无法收集属正常，不代表引擎回归。
+- 未安装 PySide6 时 `tests/test_ui.py`、`tests/test_script_editor.py` 中的用例自动跳过（skipped，不报 FAILED），不代表引擎回归。
 - 当前约 83 个测试；**改动引擎/解析器后必须跑全量引擎测试，改动 UI 后必须在 offscreen 下跑 UI 测试，并随功能补充测试**。
 
 端到端手工验证：跑无头命令后检查 `data/results/uploaded/*.json`、`data/logs/run_*.log`、`data/logs/trace/trace_*.log`（`data/` 已 gitignore，为运行产物）。
@@ -75,20 +75,32 @@ python -m unittest discover -s tests -v
 Simple_ATE/
 ├─ src/                         导入名 simple_ate（pyproject package-dir 映射）
 │  ├─ __main__.py / cli.py      入口与 run/gui 子命令、CliListener、退出码
-│  ├─ parser.py                 XML → Script；全量静态校验，错误聚合一次报出（E1xx/E2xx）
-│  ├─ model.py                  frozen dataclass：脚本语句模型 + ItemResult
-│  ├─ engine.py                 Engine：顺序执行、retry/on_fail、停止标志、资源生命周期
-│  ├─ frame_io.py               send 拼帧、wait 匹配轮询、field 提取换算、drain
-│  ├─ judge.py                  limit 判定（min/max 闭区间、eq）
-│  ├─ extension.py              <action handler="module:func"> importlib 加载 + 白名单
-│  ├─ context.py                RunContext（SN、变量表、资源句柄、logger）
-│  ├─ errors.py                 异常体系与错误码（E1xx/E2xx 加载期，E3xx 运行期）
+│  ├─ errors.py                 异常体系与错误码（E1xx/E2xx 加载期，E3xx 运行期），被所有层引用
 │  ├─ config_loader.py          station.toml → StationConfig（tomllib）
-│  ├─ logging_conf.py           run log（logging）+ TraceLogger（逐帧 TX/RX）
-│  ├─ communication/            base(Protocol+Frame) / mock / can(python-can) / serial(占位)
-│  ├─ storage/                  base(ResultStore/RunResult) + file_store(原子写+Outbox 目录)
-│  ├─ mes/                      MesUploader 协议 + NullUploader（M4 才实现上传）
-│  └─ ui/                       app / main_window / engine_bridge / worker / script_editor
+│  ├─ engine/                   脚本引擎包（不依赖任何 UI 框架）
+│  │  ├─ README.md              本模块设计与运行说明
+│  │  ├─ parser.py              XML → Script；全量静态校验，错误聚合一次报出（E1xx/E2xx）
+│  │  ├─ executor.py            Engine：顺序执行、retry/on_fail、停止标志、资源生命周期
+│  │  ├─ model.py               frozen dataclass：脚本语句模型 + ItemResult
+│  │  ├─ frame_io.py            send 拼帧、wait 匹配轮询、field 提取换算、drain
+│  │  ├─ judge.py               limit 判定（min/max 闭区间、eq）
+│  │  ├─ extension.py           <action handler="module:func"> importlib 加载 + 白名单
+│  │  └─ context.py             RunContext（SN、变量表、资源句柄、logger）
+│  ├─ logging_conf/             日志配置（横切模块）
+│  │  ├─ README.md              本模块设计与运行说明
+│  │  └─ logger.py              run log（logging）+ TraceLogger（逐帧 TX/RX）
+│  ├─ communication/            通信层
+│  │  ├─ README.md              本模块设计与运行说明
+│  │  └─ base/mock/can/serial   抽象接口(Protocol+Frame) / mock / can(python-can) / serial(占位)
+│  ├─ storage/                  结果存储
+│  │  ├─ README.md              本模块设计与运行说明
+│  │  └─ base/file_store        ResultStore 协议 + 原子写 + Outbox 目录
+│  ├─ mes/                      MES 扩展点
+│  │  ├─ README.md              本模块设计与运行说明
+│  │  └─ base                   MesUploader 协议 + NullUploader（M4 才实现上传）
+│  └─ ui/                       PySide6 界面
+│     ├─ README.md              本模块设计与运行说明
+│     └─ app/main_window/engine_bridge/worker/script_editor
 ├─ scripts/                     产品测试脚本（*.xml），UI 默认列出此目录
 ├─ config/station.toml          工位配置（随工位部署，不含产品参数）
 ├─ config/mock/*.json           Mock 应答脚本（请求 id[/data] → 应答帧）

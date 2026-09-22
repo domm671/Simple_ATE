@@ -6,7 +6,7 @@ import time
 import unittest
 from pathlib import Path
 
-from simple_ate.model import ItemResult
+from simple_ate.engine.model import ItemResult
 from simple_ate.storage.base import RunMeta
 from simple_ate.storage.file_store import FAILED, FileResultStore, PENDING, UPLOADED
 

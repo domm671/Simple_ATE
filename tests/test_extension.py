@@ -8,8 +8,8 @@ from simple_ate.communication.mock import MockCommunication
 from simple_ate.config_loader import StationConfig, ResourceConfig
 from simple_ate.engine import Engine, EngineListener
 from simple_ate.errors import ExtensionError
-from simple_ate.extension import ExtensionLoader
-from simple_ate.parser import ScriptParser
+from simple_ate.engine.extension import ExtensionLoader
+from simple_ate.engine.parser import ScriptParser
 from simple_ate.storage.file_store import FileResultStore
 
 EXT_CODE = '''

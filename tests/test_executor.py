@@ -10,7 +10,7 @@ from simple_ate.communication.base import Communication, Frame, ResourceConfig
 from simple_ate.communication.mock import MockCommunication
 from simple_ate.config_loader import StationConfig
 from simple_ate.engine import Engine, EngineListener
-from simple_ate.parser import ScriptParser
+from simple_ate.engine.parser import ScriptParser
 from simple_ate.storage.file_store import FileResultStore
 
 

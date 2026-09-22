@@ -12,7 +12,7 @@ import hashlib
 import re
 import xml.etree.ElementTree as ET
 
-from .errors import ScriptError, ScriptParseErrors
+from ..errors import ScriptError, ScriptParseErrors
 from .model import (
     Action,
     ConnectStmt,

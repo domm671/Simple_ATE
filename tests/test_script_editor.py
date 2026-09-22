@@ -7,26 +7,34 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtWidgets import (  # noqa: E402
-    QApplication,
-    QFileDialog,
-    QMessageBox,
-)
+try:
+    from PySide6.QtCore import Qt  # noqa: E402
+    from PySide6.QtWidgets import (  # noqa: E402
+        QApplication,
+        QFileDialog,
+        QMessageBox,
+    )
+except ImportError:  # 未安装可选依赖 PySide6 时，测试优雅跳过而非收集报错
+    PYSIDE6_AVAILABLE = False
+    Qt = QApplication = QFileDialog = QMessageBox = None
+else:
+    PYSIDE6_AVAILABLE = True
 
-from simple_ate.config_loader import load_config  # noqa: E402
-from simple_ate.ui.script_editor import (  # noqa: E402
-    ScriptEditorDialog,
-    new_script_template,
-    serialize,
-)
 import xml.etree.ElementTree as ET  # noqa: E402
 
-app = QApplication.instance() or QApplication([])
+if PYSIDE6_AVAILABLE:
+    from simple_ate.config_loader import load_config  # noqa: E402
+    from simple_ate.ui.script_editor import (  # noqa: E402
+        ScriptEditorDialog,
+        new_script_template,
+        serialize,
+    )
 
-# offscreen 下模态框会永久阻塞，统一自动放行
-QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok)
-QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    app = QApplication.instance() or QApplication([])
+
+    # offscreen 下模态框会永久阻塞，统一自动放行
+    QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok)
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "config" / "station.toml"
@@ -42,6 +50,7 @@ def new_dlg():
     return ScriptEditorDialog(load_config(CONFIG), path=None)
 
 
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "未安装 PySide6，跳过脚本编辑器测试")
 class TestXmlTab(unittest.TestCase):
     def test_existing_script_validates(self):
         dlg = make_dlg()
@@ -74,6 +83,7 @@ class TestXmlTab(unittest.TestCase):
         dlg.deleteLater()
 
 
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "未安装 PySide6，跳过脚本编辑器测试")
 class TestGraphTab(unittest.TestCase):
     def test_load_tree_structure(self):
         dlg = make_dlg()
@@ -199,6 +209,7 @@ class TestGraphTab(unittest.TestCase):
         dlg.deleteLater()
 
 
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "未安装 PySide6，跳过脚本编辑器测试")
 class TestActionExtraParams(unittest.TestCase):
     def test_action_extra_params_roundtrip(self):
         cfg = load_config(CONFIG)
@@ -229,6 +240,7 @@ class TestActionExtraParams(unittest.TestCase):
         dlg.deleteLater()
 
 
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "未安装 PySide6，跳过脚本编辑器测试")
 class TestSave(unittest.TestCase):
     def test_new_script_save_creates_parseable_file(self):
         tmp = Path(tempfile.mkdtemp())
@@ -241,7 +253,7 @@ class TestSave(unittest.TestCase):
         self.assertEqual(dlg.saved_path, target)
         self.assertTrue(target.exists())
         # 保存内容必须能被正式解析器加载
-        from simple_ate.parser import ScriptParser
+        from simple_ate.engine.parser import ScriptParser
         cfg = load_config(CONFIG)
         ScriptParser(
             station_resources=cfg.resource_names(),

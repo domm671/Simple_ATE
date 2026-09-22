@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 
 from ..config_loader import StationConfig
 from ..errors import ScriptParseErrors
-from ..parser import ScriptParser
+from ..engine.parser import ScriptParser
 
 # ---------------------------------------------------------------- 标签元数据
 TAG_CN = {

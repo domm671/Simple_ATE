@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import time
 
-from .communication.base import Communication, Frame
-from .errors import FieldExtractError, SendDataError, TimeoutAteError
+from ..communication.base import Communication, Frame
+from ..errors import FieldExtractError, SendDataError, TimeoutAteError
 from .model import Field as FieldSpec
 from .model import Send as SendSpec
 from .model import VarRef

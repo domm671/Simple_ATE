@@ -13,7 +13,7 @@ from __future__ import annotations
 from PySide6.QtCore import QObject, Signal
 
 from ..engine import EngineListener
-from ..model import ItemResult, Script, Step
+from ..engine.model import ItemResult, Script, Step
 from ..communication.base import Frame
 from ..storage.base import RunResult
 

@@ -18,7 +18,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from ..model import ItemResult
+from ..engine.model import ItemResult
 from .base import RunHandle, RunMeta, RunResult
 
 PENDING = "pending"

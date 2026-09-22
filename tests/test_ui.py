@@ -10,12 +10,22 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+try:
+    from PySide6.QtWidgets import QApplication  # noqa: E402
+except ImportError:  # 未安装可选依赖 PySide6 时，测试优雅跳过而非收集报错
+    PYSIDE6_AVAILABLE = False
+    QApplication = None
+else:
+    PYSIDE6_AVAILABLE = True
 
 from simple_ate.config_loader import load_config  # noqa: E402
-from simple_ate.ui.main_window import IDLE, RUNNING, MainWindow  # noqa: E402
 
-app = QApplication.instance() or QApplication([])
+if PYSIDE6_AVAILABLE:
+    from simple_ate.ui.main_window import IDLE, RUNNING, MainWindow  # noqa: E402
+    app = QApplication.instance() or QApplication([])
+else:
+    IDLE = RUNNING = ""
+    app = None
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "config" / "station.toml"
@@ -30,6 +40,7 @@ def pump(ms=100):
         time.sleep(0.01)
 
 
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "未安装 PySide6，跳过 UI 测试")
 class TestMainWindow(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

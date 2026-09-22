@@ -4,10 +4,10 @@ import unittest
 
 from simple_ate.communication.base import Frame
 from simple_ate.errors import FieldExtractError, SendDataError
-from simple_ate.frame_io import build_data, extract_field
-from simple_ate.judge import judge
-from simple_ate.model import Field as F
-from simple_ate.model import Limit, Send as SendSpec, VarRef
+from simple_ate.engine.frame_io import build_data, extract_field
+from simple_ate.engine.judge import judge
+from simple_ate.engine.model import Field as F
+from simple_ate.engine.model import Limit, Send as SendSpec, VarRef
 
 
 def frame(data: bytes) -> Frame:

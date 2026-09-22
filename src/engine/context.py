@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from .communication.base import Communication
+from ..communication.base import Communication
 
 
 @dataclass

@@ -3,7 +3,7 @@
 import unittest
 
 from simple_ate.errors import ScriptParseErrors
-from simple_ate.parser import ScriptParser
+from simple_ate.engine.parser import ScriptParser
 
 RESOURCES = {"can_main"}
 EXTS = {"sample_ext"}

@@ -24,8 +24,10 @@ simple-ate-gui = "simple_ate.ui.app:main"
 package-dir = {simple_ate = "src"}
 packages = [
     "simple_ate",
+    "simple_ate.engine",
     "simple_ate.communication",
     "simple_ate.storage",
     "simple_ate.mes",
+    "simple_ate.logging_conf",
     "simple_ate.ui",
 ]

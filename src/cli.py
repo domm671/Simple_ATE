@@ -15,7 +15,7 @@ from pathlib import Path
 from .config_loader import load_config
 from .engine import Engine, EngineListener
 from .logging_conf import TraceLogger, setup_run_logger
-from .parser import ScriptParser
+from .engine.parser import ScriptParser
 from .storage.file_store import FileResultStore
 
 _RESULT_EXIT = {"PASS": 0, "FAIL": 1, "ERROR": 2, "ABORT": 3}

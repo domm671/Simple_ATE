@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .errors import JudgeTypeError
+from ..errors import JudgeTypeError
 from .model import Limit, VarRef
 
 

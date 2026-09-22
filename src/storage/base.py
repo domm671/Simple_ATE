@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from ..model import ItemResult
+from ..engine.model import ItemResult
 
 
 @dataclass

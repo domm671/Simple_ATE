@@ -6,7 +6,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from .errors import ExtensionError
+from ..errors import ExtensionError
 from .model import VarRef
 
 

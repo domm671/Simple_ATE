@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config_loader import StationConfig
-from ..model import ItemResult
+from ..engine.model import ItemResult
 from ..storage.base import RunResult
 from .engine_bridge import EngineBridge
 from .worker import RunWorker
