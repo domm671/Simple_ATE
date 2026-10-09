@@ -67,7 +67,7 @@ python -m unittest discover -s tests -v
 ```
 
 - 未安装 PySide6 时 `tests/test_ui.py`、`tests/test_script_editor.py` 中的用例自动跳过（skipped，不报 FAILED），不代表引擎回归。
-- 当前 128 个测试；**改动引擎/解析器后必须跑全量引擎测试，改动 UI 后必须在 offscreen 下跑 UI 测试，并随功能补充测试**。
+- 当前 154 个测试；**改动引擎/解析器后必须跑全量引擎测试，改动 UI 后必须在 offscreen 下跑 UI 测试，并随功能补充测试**。
 
 端到端手工验证：跑无头命令后检查 `data/results/uploaded/*.json`、`data/logs/run_*.log`、`data/logs/trace/trace_*.log`（`data/` 已 gitignore，为运行产物）。
 
@@ -93,7 +93,7 @@ Simple_ATE/
 │  │  └─ logger.py              run log（logging）+ TraceLogger（逐帧 TX/RX）
 │  ├─ communication/            通信层
 │  │  ├─ README.md              本模块设计与运行说明
-│  │  └─ base/mock/can/serial/modbus  抽象接口 / mock / can(python-can) / serial(pyserial) / modbus(RTU/ASCII/TCP)
+│  │  └─ base/mock/can/serial/modbus  抽象接口 / mock / can(python-can) / serial(pyserial) / modbus(RTU/ASCII/TCP) / mock_serial(伪串口)
 │  ├─ storage/                  结果存储
 │  │  ├─ README.md              本模块设计与运行说明
 │  │  └─ base/file_store        ResultStore 协议 + 原子写 + Outbox 目录

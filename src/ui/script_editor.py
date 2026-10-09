@@ -86,6 +86,7 @@ ATTR_SPEC: dict[str, list[tuple[str, str, str, bool]]] = {
         ("modbus_mode", "Modbus 模式", "modbusmode", False),
         ("host", "Modbus TCP 主机", "str", False),
         ("tcp_port", "Modbus TCP 端口", "int", False),
+        ("mock_script", "Mock 应答脚本（无硬件测试）", "str", False),
     ],
     "disconnect": [
         ("resource", "逻辑资源名", "str", True),

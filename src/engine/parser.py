@@ -66,7 +66,7 @@ ALLOWED_ATTRS: dict[str, set[str]] = {
                 "port", "baudrate", "bytesize", "parity", "stopbits",
                 "flowcontrol", "read_timeout", "frame_gap", "max_frame",
                 "vid", "pid", "serial_number",
-                "unit", "modbus_mode", "host", "tcp_port"},
+                "unit", "modbus_mode", "host", "tcp_port", "mock_script"},
     "disconnect": {"resource"},
     "delay": {"ms"},
     "step": {"name", "resource", "timeout", "retry", "retry_interval", "on_fail"},
@@ -293,7 +293,8 @@ class ScriptParser:
                 errs.add("connect 的 timeout 必须是正数（秒）", "E105", el)
 
         opts: dict[str, object] = {}
-        for key in ("interface", "channel", "port", "host", "serial_number"):
+        for key in ("interface", "channel", "port", "host", "serial_number",
+                    "mock_script"):
             if key in el.attrib:
                 opts[key] = el.attrib[key]
         self._opt_int(el, "bitrate", opts, errs, minimum=1)

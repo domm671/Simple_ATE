@@ -106,13 +106,8 @@ class Engine:
             raise CommunicationError(
                 f"资源 {name!r} 未在工位配置中定义，且 <connect> 未指定 protocol")
         if proto == "mock":
-            mock_script = options.get("mock_script", "")
-            if mock_script:
-                p = Path(mock_script)
-                if not p.is_absolute():
-                    p = self.config.base_dir / p
-                mock_script = str(p.resolve())
-            return MockCommunication(name, script_path=mock_script)
+            return MockCommunication(
+                name, script_path=self._resolve_mock_script(options.get("mock_script", "")))
         if proto == "can":
             return CanCommunication(
                 name, interface=str(options.get("interface", "")),
@@ -128,19 +123,32 @@ class Engine:
             return ModbusCommunication(name, **self._modbus_options(options))
         raise CommunicationError(f"未知资源类型/协议: {proto}")
 
-    @staticmethod
-    def _serial_options(options: dict) -> dict:
+    def _resolve_mock_script(self, mock_script: str) -> str:
+        """Mock 应答脚本相对路径以配置目录为基准。"""
+        if not mock_script:
+            return ""
+        p = Path(mock_script)
+        if not p.is_absolute():
+            p = self.config.base_dir / p
+        return str(p.resolve())
+
+    def _serial_options(self, options: dict) -> dict:
         keys = ("port", "baudrate", "bytesize", "parity", "stopbits",
                 "flowcontrol", "read_timeout", "frame_gap", "max_frame",
                 "vid", "pid", "serial_number")
-        return {k: options[k] for k in keys if k in options}
+        out = {k: options[k] for k in keys if k in options}
+        if options.get("mock_script"):
+            out["mock_script"] = self._resolve_mock_script(options["mock_script"])
+        return out
 
-    @staticmethod
-    def _modbus_options(options: dict) -> dict:
+    def _modbus_options(self, options: dict) -> dict:
         keys = ("modbus_mode", "port", "baudrate", "bytesize", "parity",
                 "stopbits", "flowcontrol", "read_timeout", "frame_gap",
                 "max_frame", "host", "tcp_port", "unit")
-        return {k: options[k] for k in keys if k in options}
+        out = {k: options[k] for k in keys if k in options}
+        if options.get("mock_script"):
+            out["mock_script"] = self._resolve_mock_script(options["mock_script"])
+        return out
 
     # ------------------------------------------------------------ 停止
     def request_stop(self) -> None:

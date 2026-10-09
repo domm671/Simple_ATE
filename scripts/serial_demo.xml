@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  串口 Mock 演示：无需任何硬件即可跑通串口收发 / 字段提取 / 判定。
+  运行：python -m simple_ate run scripts/serial_demo.xml
+        （SN 用命令行参数给出，工位配置默认 config/station.toml）
+
+  说明：<connect> 用 protocol="serial" 内联声明资源，mock_script 相对 config/ 目录解析；
+  真机部署时去掉 mock_script、改为 port="COMx" 即可切换到真实串口。
+-->
+<test name="SERIAL_DEMO" version="1.0">
+
+    <connect resource="rs485_demo" protocol="serial" baudrate="115200"
+             frame_gap="0.02" mock_script="mock/serial_demo.json"/>
+
+    <!-- 请求状态下发：应答 01 00 FB -> status=1, temp=25.1C -->
+    <step name="ReadStatus" timeout="1" retry="1" on_fail="continue">
+        <send id="0" data="AA 01"/>
+        <wait id="0" min_len="3">
+            <field var="status" offset="0" length="1"/>
+            <field var="temp" offset="1" length="2" endian="big" gain="0.1" unit="C"/>
+        </wait>
+        <limit value="${status}" eq="1"/>
+    </step>
+
+    <!-- 第二路请求：应答 02，仅检查应答到达 -->
+    <step name="Ping" timeout="1" retry="1" on_fail="continue">
+        <send id="0" data="AA 02"/>
+        <wait id="0" min_len="1"/>
+    </step>
+
+    <disconnect resource="rs485_demo"/>
+
+</test>

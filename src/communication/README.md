@@ -21,8 +21,9 @@ FT 测试是严格顺序流程，引入异步只会增加复杂度。
 | `base.py` | `Frame` 帧对象、`Communication` 同步协议（Protocol）、`ResourceConfig` 资源配置 |
 | `mock.py` | `MockCommunication`：按 JSON 应答脚本回复请求，供无硬件开发与单元测试 |
 | `can.py` | `CanCommunication`：基于 python-can 的真实 CAN（interface/channel/bitrate） |
-| `serial.py` | `SerialCommunication`：基于 pyserial 的原始串口/USB CDC，按静默间隔分帧，支持 VID/PID 自动找口 |
-| `modbus.py` | `ModbusCommunication`：Modbus RTU/ASCII（串口）与 TCP，自动 CRC/LRC/MBAP 组帧与校验 |
+| `serial.py` | `SerialCommunication`：基于 pyserial 的原始串口/USB CDC，按静默间隔分帧，支持 VID/PID 自动找口；可注入 `serial_factory` 或用 `mock_script` 接入 Mock |
+| `mock_serial.py` | `MockSerialPort`：pyserial 兼容的内存伪串口，按 JSON 规则模拟设备应答（无硬件回归） |
+| `modbus.py` | `ModbusCommunication`：Modbus RTU/ASCII（串口）与 TCP，自动 CRC/LRC/MBAP 组帧与校验；串口模式同样支持 Mock |
 | `__init__.py` | 导出 `Communication` / `Frame` / `ResourceConfig` / `SerialCommunication` / `ModbusCommunication` |
 
 ## 3. 核心接口（base.py）
@@ -71,9 +72,12 @@ class Communication(Protocol):
 
 ### 4.3 SerialCommunication（serial.py）
 
-- `open()`：延迟导入 pyserial，按 `port`/`baudrate`/`bytesize`/`parity`/`stopbits`/
-  `flowcontrol` 打开串口；`protocol="usb"` 且未给 `port` 时按 `vid`/`pid`/`serial_number`
-  用 `serial.tools.list_ports` 自动找口；未安装 pyserial 给出中文安装提示；
+- `open()`：优先创建串口端口：
+  - 若给出 `mock_script`，用 `MockSerialPort.from_file()`（见 4.5），**无需 pyserial/硬件**；
+  - 否则用 `serial_factory`（默认延迟导入 pyserial）按
+    `port`/`baudrate`/`bytesize`/`parity`/`stopbits`/`flowcontrol` 打开；
+    `protocol="usb"` 且未给 `port` 时按 `vid`/`pid`/`serial_number` 自动找口；
+  - 未安装 pyserial 时给出中文安装提示；
 - `send(frame)`：直接写出 `frame.data` 并 flush；
 - `recv(timeout)`：先按 `timeout` 读首字节，再以 `frame_gap` 静默间隔为帧边界
   读到无数据/`max_frame`；返回 `Frame(id=0, data=字节块)`，
@@ -91,6 +95,27 @@ class Communication(Protocol):
 - `recv` 校验通过后返回 `Frame(id=unit, data=PDU)`，可用 `<field>` 提取；
 - 纯组帧/解析函数（`build_rtu_adu`/`parse_rtu_adu`/`crc16_modbus` 等）
   为模块级函数，便于单元测试。
+
+### 4.5 MockSerialPort（mock_serial.py，无硬件模拟）
+
+实现 pyserial 常用子集（`timeout`/`write`/`read`/`in_waiting`/`flush`/`close`），
+按 JSON 规则对写入字节做匹配并压入应答：
+
+```json
+{
+  "default_timeout": 0.2,
+  "rules": [
+    {"request_data": "AA 01", "response_data": "01 00 FB", "delay": 0.0},
+    {"response_data": "AA 55"}
+  ]
+}
+```
+
+- 串口按**字节**匹配（忽略 `request_id`/`ext`）；无 `request_data` 的规则匹配任意请求；
+- `response_data` 或 `response_computed.bytes` 给出应答；无匹配规则即不应答（上层超时）；
+- `inject(bytes)` 可模拟设备主动上报；
+- 选择方式：脚本 `<connect ... mock_script="mock/xxx.json"/>` 或工位配置同名项，
+  路径相对配置目录解析；真机部署时删除该选项即切换回 pyserial。
 
 ## 5. 与其他模块的关系
 
@@ -115,4 +140,6 @@ engine.frame_io  ──send/recv──▶  communication 实现  ──▶ 被�
 
 - `tests/test_executor.py`：Mock 资源下的端到端收发；
 - `tests/test_frame_judge.py`：基于 `Frame` 的帧构造与解析；
-- `tests/test_file_transfer.py`：Modbus CRC/LRC/MBAP 组帧与解析。
+- `tests/test_file_transfer.py`：Modbus CRC/LRC/MBAP 组帧与解析；
+- `tests/test_serial_communication.py`：Mock 串口下的收发/分帧/超时、USB 找口、
+  Modbus RTU/ASCII（Mock）与 TCP（本地回环从站）、脚本级串口 Mock 端到端。

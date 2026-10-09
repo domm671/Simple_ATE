@@ -21,12 +21,12 @@
 |---|---|---|---|
 | **M1** 无头引擎 + Mock | XML 解析与全量静态校验（错误码 E1xx/E2xx）、顺序执行、send/wait/field 原语、自定义 action 白名单加载、limit 判定 / timeout / retry / delay / 停止标志、Mock 通信（JSON 应答脚本）、结果每步即时保存、run log 与逐帧 trace、CLI 入口 | ✅ 已完成 |
 | **M2** PySide6 界面 | 五区域主窗口、引擎运行于独立 QThread（Qt 信号回主线程刷新）、扫码自动启动、SN 可选正则校验、实时进度与结论配色、内置脚本编辑器（XML 原文 / 图形化树形双页签同步，保存前全量校验） | ✅ 已完成 ||
-| **M3** 真实总线联调 | `python-can`、pyserial 串口/USB CDC、Modbus RTU/ASCII/TCP 适配代码已就位（未装库时有明确报错），真机联调与参数固化待做 | ⬜ 未开始 |
+| **M3** 真实总线联调 | `python-can`、pyserial 串口/USB CDC、Modbus RTU/ASCII/TCP 适配代码已就位（未装库时有明确报错），真机联调与参数固化待做 | ⬜ 进行中 |
 | **M4** MES 扩展点与 Outbox | 已定义 `MesUploader` 协议与 `NullUploader`；上传、退避重试、手动重传、定制类配置化加载待做 | ⬜ 未开始 |
 
 其他说明：
 
-- 累计 128 个单元测试（解析 / 执行 / 帧判定 / 扩展 / 存储 / 文件传输与 Modbus 共 103 个，UI 与脚本编辑器 25 个），开发环境全部通过；
+- 累计 154 个单元测试（解析 / 执行 / 帧判定 / 扩展 / 存储 / 文件传输与 Modbus / 串口 Mock 共 129 个，UI 与脚本编辑器 25 个），开发环境全部通过；
 - 脚本连接支持 CAN / 串口 / USB CDC / Modbus（脚本 `<connect>` 内联或工位配置）；支持人工判定与文件分块传输；
 - 进程退出码约定：`PASS=0`、`FAIL=1`、`ERROR=2`、`ABORT=3`；
 - 明确的非目标：不做通用 DSL / 表达式引擎、不内置数据库与 ORM、不内置具体 MES 协议、
@@ -84,6 +84,15 @@ python -m simple_ate run scripts/bms_ft.xml --sn BMS20260909001 --config config/
 
 退出码：`PASS=0`、`FAIL=1`、`ERROR=2`、`ABORT=3`，便于产线脚本与调度系统判定。
 
+串口/Modbus 的无硬件 Mock 演示（无需 pyserial 与串口硬件）：
+
+```bat
+python -m simple_ate run scripts/serial_demo.xml --sn SERDEMO001 --config config/station.toml
+```
+
+该脚本用 `<connect protocol="serial" mock_script="mock/serial_demo.json">` 模拟设备应答；
+真机部署时去掉 `mock_script`、改为 `port="COMx"` 即可。
+
 ### 启动图形界面（M2）
 
 ```bat
@@ -134,6 +143,7 @@ python -m unittest discover -s tests -v
 | `tests/test_storage.py` | JSON 结果保存与 Outbox 目录 |
 | `tests/test_ui.py` | 主窗口、引擎桥接、信号刷新 |
 | `tests/test_script_editor.py` | 脚本编辑器双向同步 / 增删移节点 / 校验拦截 |
+| `tests/test_serial_communication.py` | 串口 Mock、分帧/超时、USB 找口、Modbus RTU/ASCII/TCP 模拟 |
 
 > 若未安装 PySide6，UI 相关 25 个测试会被**自动跳过（skipped）**而非报错，
 > 安装 `pip install -e .[gui]` 后即自动执行，不影响引擎部分测试。
@@ -165,7 +175,7 @@ Simple_ATE/
 │  │  └─ logger.py              run log 与 CAN trace 配置
 │  ├─ communication/            通信层
 │  │  ├─ README.md              本模块设计与运行说明
-│  │  └─ base/mock/can/serial   抽象接口 / mock（JSON 应答）/ can（python-can）/ serial（pyserial）/ modbus（RTU/ASCII/TCP）
+│  │  └─ base/mock/can/serial   抽象接口 / mock / can（python-can）/ serial（pyserial）/ modbus / mock_serial（伪串口）
 │  ├─ storage/                  结果存储
 │  │  ├─ README.md              本模块设计与运行说明
 │  │  └─ base/file_store        ResultStore 协议 + FileResultStore（JSON + Outbox 目录）

@@ -107,8 +107,8 @@ connect     = "<connect" resource-attr timeout-attr? protocol-attr? conn-param* 
 disconnect  = "<disconnect" resource-attr "/>" ;
 (* conn-param: interface/channel/bitrate (CAN)
                port/baudrate/bytesize/parity/stopbits/flowcontrol/read_timeout/
-               frame_gap/max_frame/vid/pid/serial_number (serial/usb)
-               unit/modbus_mode/host/tcp_port (modbus) *)
+               frame_gap/max_frame/vid/pid/serial_number/mock_script (serial/usb)
+               unit/modbus_mode/host/tcp_port/mock_script (modbus) *)
 
 step        = "<step" step-attr ">"
               (send | wait | action | delay-stmt)* limit?
@@ -182,6 +182,7 @@ byte-token  = hex-byte | variable-ref ;       # data 中每个 token 占一个�
 | `modbus_mode` | modbus | 否 | `rtu` | `rtu` / `ascii` / `tcp` |
 | `host` | modbus | 否 | — | Modbus TCP 主机（`modbus_mode="tcp"` 时必填） |
 | `tcp_port` | modbus | 否 | `502` | Modbus TCP 端口 |
+| `mock_script` | serial/usb/modbus | 否 | — | Mock 应答脚本（JSON，相对配置目录）；给出后使用内置伪串口，无需硬件/pyserial |
 
 规则：
 
@@ -797,6 +798,7 @@ v1 同样禁止：CAN ID 用变量、一个变量占多字节发送、位域/有
     <xs:attribute name="modbus_mode"   type="modbusModeEnum"/>
     <xs:attribute name="host"          type="xs:string"/>
     <xs:attribute name="tcp_port"      type="xs:nonNegativeInteger"/>
+    <xs:attribute name="mock_script"   type="xs:string"/>
   </xs:complexType>
 
   <xs:simpleType name="protocolEnum">

@@ -1,0 +1,13 @@
+{
+  "default_timeout": 0.2,
+  "rules": [
+    {
+      "request_data": "AA 01",
+      "response_data": "01 00 FB"
+    },
+    {
+      "request_data": "AA 02",
+      "response_data": "02"
+    }
+  ]
+}

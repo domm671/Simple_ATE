@@ -26,12 +26,15 @@ mock_script = "mock/bms_can.json"
 
 # 串口 / USB CDC / Modbus 资源示例（需安装 pyserial：pip install -e .[serial]）。
 # 也可以在脚本中用 <connect protocol="serial" port="COM3" .../> 内联定义并覆盖此处配置。
+# 无硬件调试：给 serial/usb/modbus 资源加 mock_script（相对 config/ 目录），
+#   用内置伪串口按 JSON 规则应答，无需 pyserial；见 scripts/serial_demo.xml。
 # [resources.rs485]
 # type = "serial"           # serial / usb / modbus
 # port = "COM3"
 # baudrate = 115200
 # parity = "none"           # none/even/odd/mark/space
 # stopbits = 1
+# mock_script = "mock/serial_demo.json"   # 可选：无硬件模拟
 #
 # [resources.mb]
 # type = "modbus"

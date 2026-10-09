@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import socket
 import time
+from typing import Any, Callable
 
 from ..errors import CommunicationError, TimeoutAteError
 from .base import Frame
-
-_PARITY_MAP = {"none": "N", "even": "E", "odd": "O", "mark": "M", "space": "S"}
+from .serial import build_serial_kwargs, default_serial_factory
 
 
 # ---------------------------------------------------------------- 纯函数
@@ -102,7 +102,10 @@ class ModbusCommunication:
                  stopbits: float = 1.0, flowcontrol: str = "none",
                  read_timeout: float = 0.1, frame_gap: float = 0.02,
                  max_frame: int = 256, host: str = "", tcp_port: int = 502,
-                 unit: int = 1, **options):
+                 unit: int = 1, mock_script: str = "",
+                 serial_factory: Callable[..., Any] | None = None,
+                 socket_factory: Callable[..., Any] | None = None,
+                 **options):
         self.name = name
         self.mode = (modbus_mode or "rtu").lower()
         self.port = port
@@ -117,6 +120,9 @@ class ModbusCommunication:
         self.host = host
         self.tcp_port = tcp_port
         self.unit = unit
+        self.mock_script = mock_script
+        self.serial_factory = serial_factory
+        self.socket_factory = socket_factory
         self._ser = None
         self._sock: socket.socket | None = None
         self._txid = 0
@@ -126,31 +132,32 @@ class ModbusCommunication:
         if self.mode == "tcp":
             if not self.host:
                 raise CommunicationError(f"[{self.name}] Modbus TCP 需要 host")
+            factory = self.socket_factory or socket.create_connection
             try:
-                self._sock = socket.create_connection(
+                self._sock = factory(
                     (self.host, self.tcp_port), timeout=self.read_timeout)
             except OSError as exc:
                 raise CommunicationError(
                     f"[{self.name}] 连接 Modbus TCP {self.host}:{self.tcp_port} "
                     f"失败: {exc}") from exc
             return
-        try:
-            import serial  # type: ignore
-        except ImportError as exc:
-            raise CommunicationError(
-                "未安装 pyserial，无法使用串口 Modbus；请执行 pip install -e .[serial]"
-            ) from exc
+        # 串口 RTU/ASCII：支持 JSON Mock 或注入工厂
+        if self.mock_script:
+            from .mock_serial import MockSerialPort
+            port = MockSerialPort.from_file(self.mock_script)
+            port.open()
+            self._ser = port
+            return
         if not self.port:
             raise CommunicationError(f"[{self.name}] Modbus 串口未指定 port")
+        factory = self.serial_factory or default_serial_factory
+        kwargs = build_serial_kwargs(self.port, self.baudrate, self.bytesize,
+                                     self.parity, self.stopbits, self.flowcontrol,
+                                     self.read_timeout)
         try:
-            self._ser = serial.Serial(
-                port=self.port, baudrate=self.baudrate, bytesize=self.bytesize,
-                parity=_PARITY_MAP.get(self.parity, "N"), stopbits=self.stopbits,
-                timeout=self.read_timeout, write_timeout=self.read_timeout,
-                xonxoff=(self.flowcontrol == "xonxoff"),
-                rtscts=(self.flowcontrol == "rtscts"),
-                dsrdtr=(self.flowcontrol == "dsrdtr"),
-            )
+            self._ser = factory(**kwargs)
+        except CommunicationError:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise CommunicationError(
                 f"[{self.name}] 打开 Modbus 串口 {self.port} 失败: {exc}") from exc

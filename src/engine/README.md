@@ -135,3 +135,4 @@ CLI（`simple_ate.cli.CliListener`）直接打印；GUI 由
 | `tests/test_frame_judge.py` | 拼帧、ID/mask 匹配、字段提取、判定 |
 | `tests/test_extension.py` | 扩展白名单加载与入参绑定 |
 | `tests/test_file_transfer.py` | 文件分块收发、序号重排、校验、Modbus 组帧 |
+| `tests/test_serial_communication.py` | 串口 Mock 收发/分帧/超时、USB 找口、Modbus RTU/ASCII/TCP 模拟、脚本级串口 Mock 端到端 |
