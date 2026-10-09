@@ -379,5 +379,101 @@ class TestNewAttributes(unittest.TestCase):
         dlg.deleteLater()
 
 
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "未安装 PySide6，跳过脚本编辑器测试")
+class TestConnectDynamicFields(unittest.TestCase):
+    def _select_connect(self, dlg):
+        top = dlg.tree.topLevelItem(0)
+        for i in range(top.childCount()):
+            it = top.child(i)
+            if it.data(0, Qt.UserRole).tag == "connect":
+                dlg.tree.setCurrentItem(it)
+                return it
+        raise AssertionError("未找到 connect 节点")
+
+    def test_fields_follow_protocol(self):
+        cfg = load_config(CONFIG)
+        xml = ('<?xml version="1.0"?>'
+               '<test name="T" version="1.0">'
+               '<connect resource="rs485" protocol="serial" port="COM3" '
+               'baudrate="115200"/>'
+               '</test>')
+        dlg = ScriptEditorDialog(cfg, path=None)
+        dlg.xml_edit.setPlainText(xml)
+        self.assertTrue(dlg._sync_text_to_graph())
+        item = self._select_connect(dlg)
+
+        # serial：串口参数可见，CAN/Modbus 参数隐藏
+        self.assertFalse(dlg._form_widgets["port"].isHidden())
+        self.assertFalse(dlg._form_widgets["baudrate"].isHidden())
+        self.assertTrue(dlg._form_widgets["interface"].isHidden())
+        self.assertTrue(dlg._form_widgets["host"].isHidden())
+
+        # 切到 can：只剩 CAN 参数，且串口属性从元素中清除
+        proto = dlg._form_widgets["protocol"]
+        proto.setCurrentIndex(proto.findData("can"))
+        self.assertTrue(dlg._form_widgets["port"].isHidden())
+        self.assertFalse(dlg._form_widgets["interface"].isHidden())
+        el = item.data(0, Qt.UserRole)
+        self.assertNotIn("port", el.attrib)
+        self.assertNotIn("baudrate", el.attrib)
+
+        # 切到 mock：只剩 mock_script
+        proto.setCurrentIndex(proto.findData("mock"))
+        self.assertFalse(dlg._form_widgets["mock_script"].isHidden())
+        self.assertTrue(dlg._form_widgets["interface"].isHidden())
+        dlg.deleteLater()
+
+    def test_modbus_mode_follows_tcp(self):
+        cfg = load_config(CONFIG)
+        xml = ('<?xml version="1.0"?>'
+               '<test name="T" version="1.0">'
+               '<connect resource="mb" protocol="modbus" modbus_mode="rtu" '
+               'port="COM4" unit="3"/>'
+               '</test>')
+        dlg = ScriptEditorDialog(cfg, path=None)
+        dlg.xml_edit.setPlainText(xml)
+        self.assertTrue(dlg._sync_text_to_graph())
+        item = self._select_connect(dlg)
+        self.assertFalse(dlg._form_widgets["port"].isHidden())
+        self.assertTrue(dlg._form_widgets["host"].isHidden())
+
+        mode = dlg._form_widgets["modbus_mode"]
+        mode.setCurrentIndex(mode.findData("tcp"))
+        self.assertTrue(dlg._form_widgets["port"].isHidden())
+        self.assertFalse(dlg._form_widgets["host"].isHidden())
+        self.assertFalse(dlg._form_widgets["tcp_port"].isHidden())
+        dlg._form_widgets["host"].setText("192.168.1.20")
+        dlg._apply_form_to_element()
+        el = item.data(0, Qt.UserRole)
+        self.assertNotIn("port", el.attrib)
+        self.assertEqual(el.get("host"), "192.168.1.20")
+        dlg.deleteLater()
+
+    def test_station_type_fallback(self):
+        # bms_ft.xml 的 connect 未写 protocol，工位配置 can_main 的 type=mock
+        dlg = make_dlg()
+        dlg.tabs.setCurrentIndex(1)
+        self._select_connect(dlg)
+        self.assertFalse(dlg._form_widgets["mock_script"].isHidden())
+        self.assertTrue(dlg._form_widgets["interface"].isHidden())
+        self.assertTrue(dlg._form_widgets["port"].isHidden())
+        dlg.deleteLater()
+
+    def test_unknown_resource_hint(self):
+        cfg = load_config(CONFIG)
+        xml = ('<?xml version="1.0"?>'
+               '<test name="T" version="1.0">'
+               '<connect resource="not_in_station"/>'
+               '</test>')
+        dlg = ScriptEditorDialog(cfg, path=None)
+        dlg.xml_edit.setPlainText(xml)
+        self.assertTrue(dlg._sync_text_to_graph())
+        self._select_connect(dlg)
+        self.assertIn("未指定协议", dlg._connect_hint.text())
+        for key in ("interface", "port", "host", "mock_script"):
+            self.assertTrue(dlg._form_widgets[key].isHidden())
+        dlg.deleteLater()
+
+
 if __name__ == "__main__":
     unittest.main()

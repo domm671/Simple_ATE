@@ -170,6 +170,24 @@ STEP_CHILD_TAGS = set(CHILD_TAGS["step"])
 LIMIT_AUTO_ATTRS = ("value", "min", "max", "eq", "unit")
 LIMIT_MANUAL_ATTRS = ("value", "prompt", "unit")
 
+# <connect> 按协议显隐的输入项：这三个始终显示，其余按 protocol（modbus 再按 mode）联动
+CONNECT_COMMON_ATTRS = ("resource", "timeout", "protocol")
+_MODBUS_SERIAL_ATTRS = ("modbus_mode", "port", "baudrate", "bytesize", "parity",
+                        "stopbits", "flowcontrol", "read_timeout", "frame_gap",
+                        "max_frame", "unit", "mock_script")
+_MODBUS_TCP_ATTRS = ("modbus_mode", "host", "tcp_port", "unit", "read_timeout")
+CONNECT_PROTO_ATTRS: dict[str, tuple[str, ...]] = {
+    "can": ("interface", "channel", "bitrate"),
+    "serial": ("port", "baudrate", "bytesize", "parity", "stopbits",
+               "flowcontrol", "read_timeout", "frame_gap", "max_frame",
+               "mock_script"),
+    "usb": ("port", "baudrate", "bytesize", "parity", "stopbits",
+            "flowcontrol", "read_timeout", "frame_gap", "max_frame",
+            "vid", "pid", "serial_number", "mock_script"),
+    "modbus": tuple(dict.fromkeys(_MODBUS_SERIAL_ATTRS + _MODBUS_TCP_ATTRS)),
+    "mock": ("mock_script",),
+}
+
 _ENUM_OPTIONS = {
     "bool": (("", "（默认）"), ("true", "true"), ("false", "false")),
     "endian": (("", "（默认 little）"), ("little", "little 小端"), ("big", "big 大端")),
@@ -307,6 +325,8 @@ class ScriptEditorDialog(QDialog):
         self._form_widgets: dict[str, QWidget] = {}
         self._form_layout: QFormLayout | None = None
         self._limit_el: ET.Element | None = None
+        self._connect_el: ET.Element | None = None
+        self._connect_hint: QLabel | None = None
 
         first_resource = next(iter(config.resources), "")
         if path is not None:
@@ -620,6 +640,8 @@ class ScriptEditorDialog(QDialog):
         self._form_widgets = {}
         self.action_extra = None
         self._limit_el = None
+        self._connect_el = None
+        self._connect_hint = None
 
         old = self.form_scroll.takeWidget()
         if old is not None:
@@ -653,6 +675,20 @@ class ScriptEditorDialog(QDialog):
                 self._connect_widget(
                     mode_widget, lambda _v=None: self._on_limit_mode_changed())
             self._apply_limit_row_visibility()
+
+        # <connect>：根据「协议」（modbus 再按 mode）动态显隐连接参数
+        if el.tag == "connect":
+            self._connect_el = el
+            for key in ("protocol", "modbus_mode", "resource"):
+                widget = self._form_widgets.get(key)
+                if widget is not None:
+                    self._connect_widget(
+                        widget, lambda _v=None: self._on_connect_changed())
+            self._connect_hint = QLabel("")
+            self._connect_hint.setWordWrap(True)
+            self._connect_hint.setStyleSheet("color:#806000;")
+            form.addRow(self._connect_hint)
+            self._apply_connect_row_visibility()
 
         # action 的扩展入参：白名单外的任意属性，每行 key=value
         if el.tag == "action":
@@ -717,6 +753,60 @@ class ScriptEditorDialog(QDialog):
                 continue
             self._form_layout.setRowVisible(widget, attr in visible)
 
+    # ------------------------------------------------------ <connect> 联动
+    def _on_connect_changed(self) -> None:
+        """切换协议/Modbus 模式/资源后：清理跨协议属性并显隐对应输入项。"""
+        self._apply_form_to_element()
+        self._apply_connect_row_visibility()
+        self._dirty = True
+        item, _el = self._current()
+        if item is not None:
+            item.setText(0, node_label(item.data(0, Qt.UserRole)))
+
+    def _effective_connect_protocol(self) -> str:
+        """生效协议：脚本显式 protocol 优先；否则回退到工位配置的资源 type。"""
+        proto_widget = self._form_widgets.get("protocol")
+        proto = self._widget_value(proto_widget) if proto_widget is not None else ""
+        if proto:
+            return proto
+        res_widget = self._form_widgets.get("resource")
+        resource = self._widget_value(res_widget) if res_widget is not None else ""
+        spec = self.config.resources.get(resource)
+        return spec.type if spec is not None else ""
+
+    def _connect_visible_attrs(self, proto: str) -> set[str]:
+        attrs = set(CONNECT_COMMON_ATTRS)
+        if proto == "modbus":
+            mode_widget = self._form_widgets.get("modbus_mode")
+            mode = self._widget_value(mode_widget) if mode_widget is not None else ""
+            attrs |= set(_MODBUS_TCP_ATTRS if mode == "tcp" else _MODBUS_SERIAL_ATTRS)
+        else:
+            attrs |= set(CONNECT_PROTO_ATTRS.get(proto, ()))
+        return attrs
+
+    def _apply_connect_row_visibility(self) -> None:
+        """按协议（modbus 再按 mode）显隐 <connect> 表单行。"""
+        if self._connect_el is None or self._form_layout is None:
+            return
+        proto = self._effective_connect_protocol()
+        visible = self._connect_visible_attrs(proto)
+        for attr, widget in self._form_widgets.items():
+            self._form_layout.setRowVisible(widget, attr in visible)
+        if self._connect_hint is not None:
+            if not proto:
+                self._connect_hint.setText(
+                    "未指定协议：将使用工位配置中该资源的 type；"
+                    "选择 protocol 后仅显示该协议的相关参数。")
+            elif proto == "modbus":
+                self._connect_hint.setText(
+                    "Modbus：RTU/ASCII 需 port/波特率等串口参数；"
+                    "TCP 需 host/tcp_port。")
+            elif proto == "usb":
+                self._connect_hint.setText(
+                    "USB CDC：可填 port，或只填 vid/pid（/serial_number）自动找口。")
+            else:
+                self._connect_hint.setText("")
+
     def _apply_form_to_element(self) -> None:
         item = self.tree.currentItem() if hasattr(self, "tree") else None
         if item is None:
@@ -736,6 +826,16 @@ class ScriptEditorDialog(QDialog):
             for attr in list(el.attrib):
                 if attr != "mode" and attr not in allowed:
                     del el.attrib[attr]
+        if el.tag == "connect":
+            # 仅在脚本显式指定 protocol 时清理不属于该协议的属性；
+            # protocol 为空（走工位配置）时保留用户手写的参数覆盖。
+            proto_widget = self._form_widgets.get("protocol")
+            proto = self._widget_value(proto_widget) if proto_widget is not None else ""
+            if proto:
+                allowed = self._connect_visible_attrs(proto)
+                for attr in list(el.attrib):
+                    if attr not in allowed:
+                        del el.attrib[attr]
         if el.tag == "action" and self.action_extra is not None:
             for k in list(el.attrib):
                 if k not in ("handler", "var"):

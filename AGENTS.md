@@ -67,7 +67,7 @@ python -m unittest discover -s tests -v
 ```
 
 - 未安装 PySide6 时 `tests/test_ui.py`、`tests/test_script_editor.py` 中的用例自动跳过（skipped，不报 FAILED），不代表引擎回归。
-- 当前 154 个测试；**改动引擎/解析器后必须跑全量引擎测试，改动 UI 后必须在 offscreen 下跑 UI 测试，并随功能补充测试**。
+- 当前 158 个测试；**改动引擎/解析器后必须跑全量引擎测试，改动 UI 后必须在 offscreen 下跑 UI 测试，并随功能补充测试**。
 
 端到端手工验证：跑无头命令后检查 `data/results/uploaded/*.json`、`data/logs/run_*.log`、`data/logs/trace/trace_*.log`（`data/` 已 gitignore，为运行产物）。
 

@@ -80,6 +80,10 @@ Qt Signal（自动 QueuedConnection）投递回主线程刷新控件
 - **`<limit>` 表单随判定方式联动**：`mode=auto` 只显示 `value/min/max/eq/unit`，
   `mode=manual` 只显示 `value/prompt/unit`；切换时隐藏行并自动从元素中
   清除互斥属性（避免隐藏的 min/max/eq 残留导致 E120）；
+- **`<connect>` 表单随协议联动**：`protocol=can/serial/usb/modbus/mock` 时只显示
+  该协议相关参数（Modbus 再按 `modbus_mode` 区分串口参数 / `host`+`tcp_port`）；
+  未写 `protocol` 时回退到工位配置的资源 `type` 决定显示，并在表单内给出提示；
+  显式指定协议后会从元素中清除不属于该协议的属性。
 - 保存前复用 `ScriptParser` 做全量静态校验，错误码/行列/说明一次列出，
   校验不过不写文件；
 - **已知约束**：经图形页往返会丢失 XML 注释（界面中有提示）。
