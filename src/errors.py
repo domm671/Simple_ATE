@@ -88,6 +88,16 @@ class SendDataError(RuntimeAteError):
     retryable = False
 
 
+class FileTransferError(RuntimeAteError):
+    """文件传输失败（文件不存在、长度/校验不符、超过安全上限）。
+
+    E308，属通信类异常，可重试（重传整步）。
+    """
+
+    code = "E308"
+    retryable = True
+
+
 class JudgeTypeError(RuntimeAteError):
     """判定值与判据类型不相容。E209，不重试。"""
 

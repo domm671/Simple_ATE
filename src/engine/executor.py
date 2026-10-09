@@ -16,6 +16,7 @@ from .. import __version__
 from ..communication.base import Communication, Frame
 from ..communication.can import CanCommunication
 from ..communication.mock import MockCommunication
+from ..communication.modbus import ModbusCommunication
 from ..communication.serial import SerialCommunication
 from ..config_loader import StationConfig
 from ..errors import (
@@ -32,13 +33,14 @@ from . import frame_io
 from .context import RunContext
 from .extension import ExtensionLoader, resolve_kwargs
 from .frame_io import do_send, do_wait
-from .judge import judge
+from .judge import judge, resolve
 from .model import (
     Action,
     ConnectStmt,
     DelayStmt,
     DisconnectStmt,
     ItemResult,
+    ManualJudgeRequest,
     Script,
     Send,
     Step,
@@ -57,6 +59,14 @@ class EngineListener:
     def on_trace(self, direction: str, resource: str, frame: Frame) -> None: ...
     def on_step_finish(self, step: Step, item: ItemResult) -> None: ...
     def on_run_finish(self, result: RunResult) -> None: ...
+
+    def on_manual_judge(self, request: ManualJudgeRequest) -> bool | None:
+        """人工判定（`<limit mode="manual">`）。
+
+        返回 True=合格、False=不合格、None=中止（Run 最终为 ABORT）。
+        基类默认返回 None（无人工判定能力时安全中止）。
+        """
+        return None
 
 
 @dataclass
@@ -81,24 +91,56 @@ class Engine:
     extensions: ExtensionLoader | None = None
 
     # ------------------------------------------------------------ 资源工厂
-    def _build_resource(self, name: str) -> Communication:
-        spec = self.config.resources[name]
-        opt = spec.options
-        if spec.type == "mock":
-            mock_script = opt.get("mock_script", "")
+    def _build_resource(self, stmt: ConnectStmt) -> Communication:
+        """按 <connect> 与工位配置合并后的结果创建通信资源。
+
+        优先级：脚本 <connect> 属性 > 工位配置 [resources.xxx]；
+        protocol 未显式给出时取工位配置的 type。
+        """
+        name = stmt.resource
+        spec = self.config.resources.get(name)
+        options: dict[str, Any] = dict(spec.options) if spec else {}
+        options.update(stmt.options_dict())
+        proto = stmt.protocol or (spec.type if spec else None)
+        if proto is None:
+            raise CommunicationError(
+                f"资源 {name!r} 未在工位配置中定义，且 <connect> 未指定 protocol")
+        if proto == "mock":
+            mock_script = options.get("mock_script", "")
             if mock_script:
                 p = Path(mock_script)
                 if not p.is_absolute():
                     p = self.config.base_dir / p
                 mock_script = str(p.resolve())
             return MockCommunication(name, script_path=mock_script)
-        if spec.type == "can":
+        if proto == "can":
             return CanCommunication(
-                name, interface=opt.get("interface", ""),
-                channel=opt.get("channel", ""), bitrate=int(opt.get("bitrate", 500000)))
-        if spec.type == "serial":
-            return SerialCommunication(name, **opt)
-        raise CommunicationError(f"未知资源类型: {spec.type}")
+                name, interface=str(options.get("interface", "")),
+                channel=str(options.get("channel", "")),
+                bitrate=int(options.get("bitrate", 500000)))
+        if proto == "serial":
+            return SerialCommunication(name, **self._serial_options(options))
+        if proto == "usb":
+            opts = self._serial_options(options)
+            opts["resolve_usb"] = True
+            return SerialCommunication(name, **opts)
+        if proto == "modbus":
+            return ModbusCommunication(name, **self._modbus_options(options))
+        raise CommunicationError(f"未知资源类型/协议: {proto}")
+
+    @staticmethod
+    def _serial_options(options: dict) -> dict:
+        keys = ("port", "baudrate", "bytesize", "parity", "stopbits",
+                "flowcontrol", "read_timeout", "frame_gap", "max_frame",
+                "vid", "pid", "serial_number")
+        return {k: options[k] for k in keys if k in options}
+
+    @staticmethod
+    def _modbus_options(options: dict) -> dict:
+        keys = ("modbus_mode", "port", "baudrate", "bytesize", "parity",
+                "stopbits", "flowcontrol", "read_timeout", "frame_gap",
+                "max_frame", "host", "tcp_port", "unit")
+        return {k: options[k] for k in keys if k in options}
 
     # ------------------------------------------------------------ 停止
     def request_stop(self) -> None:
@@ -122,7 +164,9 @@ class Engine:
             self.extensions_dir, self.config.extensions_allowed)
 
         ctx = RunContext(sn=sn, station_id=self.config.station_id,
-                         logger=_get_logger(self.listener))
+                         logger=_get_logger(self.listener),
+                         script_dir=Path(script.path).parent if script.path
+                         else self.config.base_dir)
         self.trace = TraceLogger(trace_path) if trace_path else None
 
         start_time = now_iso()
@@ -206,7 +250,7 @@ class Engine:
     def _do_connect(self, ctx: RunContext, stmt: ConnectStmt) -> None:
         if stmt.resource in ctx.resources:
             raise SimpleAteError(f"资源 {stmt.resource} 重复 connect")
-        comm = self._build_resource(stmt.resource)
+        comm = self._build_resource(stmt)
         comm.open()
         ctx.resources[stmt.resource] = comm
         ctx.logger.info(f"[{stmt.resource}] opened")
@@ -239,18 +283,44 @@ class Engine:
             ctx.logger.info(f"[STEP] {step.name} start (attempt {attempt}/{attempts})")
             try:
                 value, unit = self._run_attempt(ctx, step)
-                # 判定
+                elapsed = time.monotonic() - t0
+
+                # 人工判定：不重试，不按帧自动判定
+                if step.limit is not None and step.limit.mode == "manual":
+                    judged_value = value
+                    if step.limit.value is not None:
+                        judged_value = _jsonable(
+                            resolve(step.limit.value, ctx.variables))
+                    unit = step.limit.unit or unit
+                    request = ManualJudgeRequest(
+                        seq=seq, step_name=step.name,
+                        prompt=step.limit.prompt or step.name,
+                        value=judged_value, unit=unit)
+                    decision = self.listener.on_manual_judge(request)
+                    if decision is None:
+                        self.stop_event.set()
+                        return self._item(step, seq, judged_value, unit, "ERROR",
+                                          elapsed, attempt - 1,
+                                          error_code="E310",
+                                          message="人工判定被取消（Run 中止）",
+                                          judge_mode="manual")
+                    return self._item(
+                        step, seq, judged_value, unit,
+                        "PASS" if decision else "FAIL", elapsed, attempt - 1,
+                        message="人工判定：合格" if decision else "人工判定：不合格",
+                        judge_mode="manual")
+
+                # 自动判定
                 if step.limit is not None:
                     passed, judged = judge(step.limit, ctx.variables)
                     value = judged
                     unit = step.limit.unit or unit
                     if not passed:
                         return self._item(step, seq, value, unit, "FAIL",
-                                          time.monotonic() - t0, attempt - 1,
+                                          elapsed, attempt - 1,
                                           message="测量值超出限值")
                 return self._item(step, seq, value, unit, "PASS",
-                                  time.monotonic() - t0, attempt - 1,
-                                  message=None)
+                                  elapsed, attempt - 1, message=None)
             except RuntimeAteError as exc:
                 last_error = exc
                 if not exc.retryable or attempt == attempts:
@@ -287,34 +357,56 @@ class Engine:
                 nxt = instrs[idx + 1] if idx + 1 < len(instrs) else None
                 if isinstance(nxt, Wait) and nxt.drain == "before":
                     frame_io.drain(comm)
-                frame = do_send(instr, comm, ctx.variables)
-                self.listener.on_trace("TX", comm.name, frame)
-                if self.trace:
-                    self.trace.tx(comm.name, frame)
-                ctx.logger.info(f"[TX][{comm.name}] {frame}")
+                if instr.mode == "file":
+                    for frame in frame_io.iter_send_file(
+                            instr, comm, ctx.script_dir, self._check_stop):
+                        self._emit_tx(ctx, comm, frame)
+                else:
+                    self._emit_tx(ctx, comm, do_send(instr, comm, ctx.variables))
             elif isinstance(instr, Wait):
                 # 独立 wait（前面没有配对 send）：在等待开始时按 drain 处理
                 prev = instrs[idx - 1] if idx > 0 else None
                 if not isinstance(prev, Send) and instr.drain == "before":
                     frame_io.drain(comm)
-                frame, extracted = do_wait(instr, comm, ctx.variables,
-                                           default_timeout=step.timeout,
-                                           should_cancel=self._check_stop)
-                self.listener.on_trace("RX", comm.name, frame)
-                if self.trace:
-                    self.trace.rx(comm.name, frame)
-                ctx.logger.info(f"[RX][{comm.name}] {frame} fields={extracted}")
-                if extracted:
-                    # 取本 wait 最后一个字段作为 step 测量值候选
-                    last_field = instr.fields[-1]
-                    value = extracted[last_field.var]
-                    unit = last_field.unit
+                if instr.mode == "file":
+                    stats = frame_io.do_wait_file(
+                        instr, comm, ctx.variables, ctx.script_dir, step.timeout,
+                        should_cancel=self._check_stop,
+                        on_frame=lambda fr: self._emit_rx(ctx, comm, fr))
+                    value = stats.bytes_received
+                    unit = "B"
+                    ctx.logger.info(
+                        f"[RX][{comm.name}] file {stats.bytes_received} bytes / "
+                        f"{stats.chunks} chunks -> {stats.path}")
+                else:
+                    frame, extracted = do_wait(instr, comm, ctx.variables,
+                                               default_timeout=step.timeout,
+                                               should_cancel=self._check_stop)
+                    self._emit_rx(ctx, comm, frame)
+                    ctx.logger.info(f"[RX][{comm.name}] {frame} fields={extracted}")
+                    if extracted:
+                        # 取本 wait 最后一个字段作为 step 测量值候选
+                        last_field = instr.fields[-1]
+                        value = extracted[last_field.var]
+                        unit = last_field.unit
             elif isinstance(instr, DelayStmt):
                 self._interruptible_sleep(instr.ms / 1000.0)
             elif isinstance(instr, Action):
                 value = self._run_action(ctx, comm, instr)
 
         return value, unit
+
+    def _emit_tx(self, ctx: RunContext, comm: Communication, frame: Frame) -> None:
+        self.listener.on_trace("TX", comm.name, frame)
+        if self.trace:
+            self.trace.tx(comm.name, frame)
+        ctx.logger.info(f"[TX][{comm.name}] {frame}")
+
+    def _emit_rx(self, ctx: RunContext, comm: Communication, frame: Frame) -> None:
+        self.listener.on_trace("RX", comm.name, frame)
+        if self.trace:
+            self.trace.rx(comm.name, frame)
+        ctx.logger.info(f"[RX][{comm.name}] {frame}")
 
     def _run_action(self, ctx: RunContext, comm: Communication, instr: Action):
         assert self.extensions is not None
@@ -333,7 +425,8 @@ class Engine:
     @staticmethod
     def _item(step: Step, seq: int, value, unit, result: str, elapsed: float,
               retries: int, error_code: str | None = None,
-              message: str | None = None) -> ItemResult:
+              message: str | None = None,
+              judge_mode: str = "auto") -> ItemResult:
         lo = step.limit.min if step.limit else None
         hi = step.limit.max if step.limit else None
         return ItemResult(
@@ -341,7 +434,8 @@ class Engine:
             value=_jsonable(value), unit=unit,
             low_limit=lo, high_limit=hi,
             result=result, duration_ms=int(elapsed * 1000),
-            retries=retries, error_code=error_code, message=message)
+            retries=retries, error_code=error_code, message=message,
+            judge_mode=judge_mode)
 
 
 def _jsonable(value: Any) -> Any:

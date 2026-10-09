@@ -5,9 +5,11 @@
 
 ## 1. 模块定位
 
-通信层只负责**帧（Frame）的收发**，不理解任何产品协议——CAN ID 含义、
-字节布局、应答匹配全部由引擎（frame_io）与脚本声明。
-本层对上提供统一的同步接口，使真实设备与 Mock 设备可等价替换。
+通信层只负责**帧（Frame）的收发**（串口模式下帧为原始字节块，Modbus 模式下帧为 PDU），
+不理解任何产品协议——CAN ID 含义、字节布局、应答匹配全部由引擎（frame_io）
+与脚本声明。本层对上提供统一的同步接口，使真实设备与 Mock 设备可等价替换。
+
+支持协议：`can` / `serial` / `usb`（CDC 虚拟串口）/ `modbus`（RTU/ASCII/TCP）/ `mock`。
 
 **v0.1 采用同步接口，不使用 asyncio**：底层 python-can/pyserial 均为同步库，
 FT 测试是严格顺序流程，引入异步只会增加复杂度。
@@ -18,9 +20,10 @@ FT 测试是严格顺序流程，引入异步只会增加复杂度。
 |---|---|
 | `base.py` | `Frame` 帧对象、`Communication` 同步协议（Protocol）、`ResourceConfig` 资源配置 |
 | `mock.py` | `MockCommunication`：按 JSON 应答脚本回复请求，供无硬件开发与单元测试 |
-| `can.py` | `CanCommunication`：基于 python-can 的真实 CAN（M3 联调） |
-| `serial.py` | `SerialCommunication`：v0.1 占位，内建帧原语不支持串口 |
-| `__init__.py` | 导出 `Communication` / `Frame` / `ResourceConfig` |
+| `can.py` | `CanCommunication`：基于 python-can 的真实 CAN（interface/channel/bitrate） |
+| `serial.py` | `SerialCommunication`：基于 pyserial 的原始串口/USB CDC，按静默间隔分帧，支持 VID/PID 自动找口 |
+| `modbus.py` | `ModbusCommunication`：Modbus RTU/ASCII（串口）与 TCP，自动 CRC/LRC/MBAP 组帧与校验 |
+| `__init__.py` | 导出 `Communication` / `Frame` / `ResourceConfig` / `SerialCommunication` / `ModbusCommunication` |
 
 ## 3. 核心接口（base.py）
 
@@ -68,8 +71,26 @@ class Communication(Protocol):
 
 ### 4.3 SerialCommunication（serial.py）
 
-v0.1 占位：`open/send/recv` 均抛 `CommunicationError`，提示需要在
-扩展 action 中自行使用 pyserial。
+- `open()`：延迟导入 pyserial，按 `port`/`baudrate`/`bytesize`/`parity`/`stopbits`/
+  `flowcontrol` 打开串口；`protocol="usb"` 且未给 `port` 时按 `vid`/`pid`/`serial_number`
+  用 `serial.tools.list_ports` 自动找口；未安装 pyserial 给出中文安装提示；
+- `send(frame)`：直接写出 `frame.data` 并 flush；
+- `recv(timeout)`：先按 `timeout` 读首字节，再以 `frame_gap` 静默间隔为帧边界
+  读到无数据/`max_frame`；返回 `Frame(id=0, data=字节块)`，
+  脚本用 `<wait id="0" min_len="..."/>` 等待；
+- 串口 Modbus 请使用 `ModbusCommunication`（见 4.4）。
+
+### 4.4 ModbusCommunication（modbus.py）
+
+脚本映射：`<send id="<unit>" data="<PDU>"/>`、`<wait id="<unit>">`。
+
+- RTU：`unit + PDU + CRC16(0xA001)`；接收按功能码推断长度（读类看字节数，
+  写类固定 8 字节，异常响应 5 字节）并校验 CRC；
+- ASCII：`:` + hex(unit+PDU+LRC) + CRLF；
+- TCP：MBAP（事务号 + 协议 + 长度 + unit）+ PDU，自动分配事务号；
+- `recv` 校验通过后返回 `Frame(id=unit, data=PDU)`，可用 `<field>` 提取；
+- 纯组帧/解析函数（`build_rtu_adu`/`parse_rtu_adu`/`crc16_modbus` 等）
+  为模块级函数，便于单元测试。
 
 ## 5. 与其他模块的关系
 
@@ -87,8 +108,11 @@ engine.frame_io  ──send/recv──▶  communication 实现  ──▶ 被�
 
 实现 `Communication` Protocol（`open/close/send/recv`），并在
 `Engine._build_resource` 注册新的 `type`；脚本与引擎其他部分无需改动。
+资源由 `<connect resource=... protocol=... 参数...>` 或工位配置创建，
+脚本参数优先。
 
 ## 7. 相关测试
 
 - `tests/test_executor.py`：Mock 资源下的端到端收发；
-- `tests/test_frame_judge.py`：基于 `Frame` 的帧构造与解析。
+- `tests/test_frame_judge.py`：基于 `Frame` 的帧构造与解析；
+- `tests/test_file_transfer.py`：Modbus CRC/LRC/MBAP 组帧与解析。

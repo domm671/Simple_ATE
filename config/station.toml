@@ -24,6 +24,22 @@ mock_script = "mock/bms_can.json"
 # channel = "PCAN_USBBUS1"
 # bitrate = 500000
 
+# 串口 / USB CDC / Modbus 资源示例（需安装 pyserial：pip install -e .[serial]）。
+# 也可以在脚本中用 <connect protocol="serial" port="COM3" .../> 内联定义并覆盖此处配置。
+# [resources.rs485]
+# type = "serial"           # serial / usb / modbus
+# port = "COM3"
+# baudrate = 115200
+# parity = "none"           # none/even/odd/mark/space
+# stopbits = 1
+#
+# [resources.mb]
+# type = "modbus"
+# modbus_mode = "rtu"        # rtu/ascii/tcp
+# port = "COM4"
+# baudrate = 9600
+# unit = 3
+
 # 可选自定义 action 白名单（模块相对 extensions/ 目录）
 [extensions]
 dir = "../extensions"

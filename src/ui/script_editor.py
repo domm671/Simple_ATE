@@ -66,6 +66,26 @@ ATTR_SPEC: dict[str, list[tuple[str, str, str, bool]]] = {
     "connect": [
         ("resource", "逻辑资源名", "str", True),
         ("timeout", "打开超时（秒）", "float", False),
+        ("protocol", "协议（留空取工位配置）", "protocol", False),
+        ("interface", "CAN 接口（如 pcan/slcan）", "str", False),
+        ("channel", "CAN 通道", "str", False),
+        ("bitrate", "CAN 比特率", "int", False),
+        ("port", "串口/USB 口（如 COM3）", "str", False),
+        ("baudrate", "波特率", "int", False),
+        ("bytesize", "数据位（5-8）", "int", False),
+        ("parity", "校验位", "parity", False),
+        ("stopbits", "停止位（1/1.5/2）", "float", False),
+        ("flowcontrol", "流控", "flowcontrol", False),
+        ("read_timeout", "读超时（秒）", "float", False),
+        ("frame_gap", "串口帧间隔（秒）", "float", False),
+        ("max_frame", "串口单帧上限（字节）", "int", False),
+        ("vid", "USB VID（十六进制）", "str", False),
+        ("pid", "USB PID（十六进制）", "str", False),
+        ("serial_number", "USB 序列号", "str", False),
+        ("unit", "Modbus 从站地址", "int", False),
+        ("modbus_mode", "Modbus 模式", "modbusmode", False),
+        ("host", "Modbus TCP 主机", "str", False),
+        ("tcp_port", "Modbus TCP 端口", "int", False),
     ],
     "disconnect": [
         ("resource", "逻辑资源名", "str", True),
@@ -82,18 +102,35 @@ ATTR_SPEC: dict[str, list[tuple[str, str, str, bool]]] = {
         ("on_fail", "失败策略", "onfail", False),
     ],
     "send": [
-        ("id", "CAN ID（如 0x18FF50E5）", "str", True),
+        ("id", "帧 ID / 从站地址（如 0x18FF50E5）", "str", True),
         ("id_mask", "匹配掩码 ID", "str", False),
         ("ext", "是否扩展帧（29 位）", "bool", False),
         ("data", "数据字节（空格分隔，如 02 01 00）", "str", False),
+        ("mode", "发送模式", "sendmode", False),
+        ("file", "待发送文件路径（相对脚本目录）", "str", False),
+        ("chunk_size", "文件分块字节数", "int", False),
+        ("seq_len", "每帧序号字节数（0/1/2/4）", "int", False),
+        ("header", "每帧固定前缀字节（十六进制）", "str", False),
+        ("interval", "帧间隔（秒）", "float", False),
     ],
     "wait": [
-        ("id", "应答 CAN ID", "str", True),
+        ("id", "应答帧 ID / 从站地址", "str", True),
         ("id_mask", "匹配掩码 ID", "str", False),
         ("ext", "是否扩展帧（29 位）", "bool", False),
         ("timeout", "本次等待超时（秒）", "float", False),
         ("drain", "缓冲清空方式", "drain", False),
         ("min_len", "应答最小数据长度", "int", False),
+        ("mode", "接收模式", "receivemode", False),
+        ("file", "接收保存路径（相对脚本目录）", "str", False),
+        ("chunk_size", "每帧有效数据字节数", "int", False),
+        ("seq_len", "每帧序号字节数（0/1/2/4）", "int", False),
+        ("header", "期望前缀字节（十六进制）", "str", False),
+        ("size", "期望总字节数", "int", False),
+        ("chunks", "期望帧数", "int", False),
+        ("idle_gap", "静默终止秒数", "float", False),
+        ("max_size", "接收安全上限（字节）", "int", False),
+        ("checksum", "校验算法", "checksum", False),
+        ("checksum_value", "期望校验值（十六进制或 ${var}）", "str", False),
     ],
     "field": [
         ("var", "变量名", "str", True),
@@ -106,10 +143,12 @@ ATTR_SPEC: dict[str, list[tuple[str, str, str, bool]]] = {
         ("unit", "工程单位（仅记录）", "str", False),
     ],
     "limit": [
-        ("value", "被判定值（数值或 ${变量}）", "str", True),
+        ("mode", "判定方式", "limitmode", False),
+        ("value", "被判定值（数值或 ${变量}）", "str", False),
         ("min", "下限（闭区间）", "float", False),
         ("max", "上限（闭区间）", "float", False),
         ("eq", "等值判据（与 min/max 互斥）", "str", False),
+        ("prompt", "人工判定提示内容", "str", False),
         ("unit", "单位（仅记录）", "str", False),
     ],
     "action": [
@@ -132,6 +171,23 @@ _ENUM_OPTIONS = {
     "drain": (("", "（默认 before）"), ("before", "before 发前清空"), ("off", "off 不清空")),
     "onfail": (("", "（默认 abort）"), ("abort", "abort 终止 Run"),
                ("continue", "continue 记录后继续")),
+    "protocol": (("", "（取工位配置）"), ("can", "can"), ("serial", "serial"),
+                 ("modbus", "modbus"), ("usb", "usb"), ("mock", "mock")),
+    "parity": (("", "（默认 none）"), ("none", "none"), ("even", "even"),
+               ("odd", "odd"), ("mark", "mark"), ("space", "space")),
+    "flowcontrol": (("", "（默认 none）"), ("none", "none"),
+                    ("xonxoff", "xonxoff"), ("rtscts", "rtscts"),
+                    ("dsrdtr", "dsrdtr")),
+    "modbusmode": (("", "（默认 rtu）"), ("rtu", "rtu"), ("ascii", "ascii"),
+                   ("tcp", "tcp")),
+    "sendmode": (("", "（默认 single）"), ("single", "single 单次通讯"),
+                 ("file", "file 文件传输")),
+    "receivemode": (("", "（默认 single）"), ("single", "single 单帧应答"),
+                    ("file", "file 文件接收")),
+    "limitmode": (("", "（默认 auto）"), ("auto", "auto 按返回帧判定"),
+                  ("manual", "manual 人工判定")),
+    "checksum": (("", "（默认 none）"), ("none", "none"), ("crc32", "crc32"),
+                 ("crc16_modbus", "crc16_modbus"), ("sum8", "sum8")),
 }
 
 # 新建节点时给出的可直接编辑的初始属性
@@ -192,7 +248,8 @@ def node_label(el: ET.Element) -> str:
     if tag == "test":
         return f"脚本 · {a.get('name', '(未命名)')}  v{a.get('version', '?')}"
     if tag == "connect":
-        return f"连接资源 · {a.get('resource', '(未选择)')}"
+        proto = f" [{a['protocol']}]" if a.get("protocol") else ""
+        return f"连接资源 · {a.get('resource', '(未选择)')}{proto}"
     if tag == "disconnect":
         return f"断开资源 · {a.get('resource', '(未选择)')}"
     if tag == "delay":
@@ -202,15 +259,21 @@ def node_label(el: ET.Element) -> str:
         return f"测试步 · {a.get('name', '(未命名)')}{extra}"
     if tag == "send":
         ext = " 扩展帧" if a.get("ext") == "true" else ""
+        if a.get("mode") == "file":
+            return f"发送文件 → {a.get('file', '?')}（{a.get('chunk_size', '8')}B/帧）"
         data = f"  data=[{a['data']}]" if a.get("data") else ""
         return f"发送 → {a.get('id', '?')}{ext}{data}"
     if tag == "wait":
+        if a.get("mode") == "file":
+            return f"接收文件 ← {a.get('file', '?')}"
         n = len(el)
         fields = f"  字段×{n}" if n else ""
         return f"等待 ← {a.get('id', '?')}{fields}"
     if tag == "field":
         return f"字段 · {a.get('var', '?')}[{a.get('offset', '?')}]"
     if tag == "limit":
+        if a.get("mode") == "manual":
+            return f"人工判定 · {a.get('prompt', a.get('value', '?'))}"
         if a.get("eq") is not None:
             crit = f"== {a['eq']}"
         else:
@@ -653,7 +716,9 @@ class ScriptEditorDialog(QDialog):
         """用正式解析器做静态校验，返回错误信息文本（空串表示通过）。"""
         parser = ScriptParser(
             station_resources=self.config.resource_names(),
-            allowed_extensions=set(self.config.extensions_allowed))
+            allowed_extensions=set(self.config.extensions_allowed),
+            station_protocols={name: spec.type
+                               for name, spec in self.config.resources.items()})
         try:
             parser.parse_bytes(text.encode("utf-8"), source_path=str(self.path or ""))
         except ScriptParseErrors as exc:

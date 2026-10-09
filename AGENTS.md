@@ -8,7 +8,7 @@
 
 ## 1. 项目是什么
 
-Simple_ATE 是一个尽量小的产线自动测试（ATE/FT）执行软件，运行在 Windows 工位机上，按 **XML 声明式脚本** 通过 CAN（预留 serial/TCP）与被测装备交互，完成顺序测试、限值判定、结果记录与 MES 上传扩展点。
+Simple_ATE 是一个尽量小的产线自动测试（ATE/FT）执行软件，运行在 Windows 工位机上，按 **XML 声明式脚本** 通过 CAN / 串口 / USB CDC / Modbus 与被测装备交互，完成顺序测试、限值判定（自动/人工）、文件传输、结果记录与 MES 上传扩展点。
 
 核心理念：
 
@@ -18,7 +18,9 @@ Simple_ATE 是一个尽量小的产线自动测试（ATE/FT）执行软件，运
 - **结果绝不丢失**：每步即时落 JSON 并 flush，MES 故障不阻塞生产。
 - **刻意保持小**：无 DSL/表达式引擎、无数据库/ORM、无插件系统、无多设备并行（见 `设计说明.md` 第 13 章非目标）。
 
-当前里程碑：M1（无头引擎 + Mock）✅、M2（PySide6 GUI 含脚本编辑器）✅、M3（真实 CAN 联调，适配代码已就位）⬜、M4（MES Outbox 上传）⬜。
+当前里程碑：M1（无头引擎 + Mock）✅、M2（PySide6 GUI 含脚本编辑器）✅、M3（真实 CAN/串口/USB/Modbus 联调，适配代码已就位）⬜、M4（MES Outbox 上传）⬜。
+
+v2.1 脚本增强：`<connect>` 可携带 `protocol` 与串口/Modbus/USB/CAN 参数（脚本优先于工位配置）；`<limit mode="manual">` 界面弹窗人工判定；`<send mode="file">`/`<wait mode="file">` 文件分块传输。
 
 ## 2. 技术栈与依赖纪律
 
@@ -65,7 +67,7 @@ python -m unittest discover -s tests -v
 ```
 
 - 未安装 PySide6 时 `tests/test_ui.py`、`tests/test_script_editor.py` 中的用例自动跳过（skipped，不报 FAILED），不代表引擎回归。
-- 当前约 83 个测试；**改动引擎/解析器后必须跑全量引擎测试，改动 UI 后必须在 offscreen 下跑 UI 测试，并随功能补充测试**。
+- 当前 128 个测试；**改动引擎/解析器后必须跑全量引擎测试，改动 UI 后必须在 offscreen 下跑 UI 测试，并随功能补充测试**。
 
 端到端手工验证：跑无头命令后检查 `data/results/uploaded/*.json`、`data/logs/run_*.log`、`data/logs/trace/trace_*.log`（`data/` 已 gitignore，为运行产物）。
 
@@ -91,7 +93,7 @@ Simple_ATE/
 │  │  └─ logger.py              run log（logging）+ TraceLogger（逐帧 TX/RX）
 │  ├─ communication/            通信层
 │  │  ├─ README.md              本模块设计与运行说明
-│  │  └─ base/mock/can/serial   抽象接口(Protocol+Frame) / mock / can(python-can) / serial(占位)
+│  │  └─ base/mock/can/serial/modbus  抽象接口 / mock / can(python-can) / serial(pyserial) / modbus(RTU/ASCII/TCP)
 │  ├─ storage/                  结果存储
 │  │  ├─ README.md              本模块设计与运行说明
 │  │  └─ base/file_store        ResultStore 协议 + 原子写 + Outbox 目录
@@ -134,6 +136,7 @@ ui  ──Qt Signal(queued)──▶ EngineListener 回调  ──▶ engine ─
 - 停止通过 `threading.Event` 协作式中断（`request_stop()`），不 kill 线程；指令边界、Attempt 之间、`delay` 每 50ms（`_interruptible_sleep`）、wait 轮询（50ms 粒度）检查停止标志。
 - 所有已打开资源在 `Engine.run` 的 `finally` 中无条件 `close()`。
 - GUI 线程模型：`RunWorker` 把 `_Runner` `moveToThread` 到 `QThread`；`EngineBridge`（QObject + EngineListener）在工作线程被回调，经 Qt 信号自动以 queued connection 投递主线程。**UI 线程绝不直接调用通信层或 Engine 阻塞方法**；桥接信号只传快照/基本类型，不传 `RunContext` 等带句柄对象。
+- 人工判定桥接：工作线程 `EngineBridge.on_manual_judge` 发 `manualJudgeRequested` 后阻塞在 `threading.Event`；主线程弹窗后调 `resolve_manual_judge(decision)` 置位事件。不要在主线程直接调 Engine 阻塞方法。
 - 配置中的相对路径以**配置文件所在目录**（`cfg.base_dir`）为基准解析；脚本目录默认可用环境变量 `SIMPLE_ATE_SCRIPTS` 覆盖。
 
 ## 6. 执行语义（改动引擎时务必保持）
@@ -143,6 +146,9 @@ ui  ──Qt Signal(queued)──▶ EngineListener 回调  ──▶ engine ─
 - **retry 只针对 `retryable=True` 的 `RuntimeAteError`**（E301/E302/E305/E306），重试粒度是整个 step（总尝试 = retry+1）；**判定 FAIL、E209、E307 不重试**；未预期异常记 E303。
 - `wait drain="before"`（默认）在**配对 send 之前**清空接收缓冲（`frame_io.drain`）；独立 wait 在等待开始时清空。注意 drain 不能放在 `do_wait` 内，否则会删掉同步 mock 中 send 即刻入队的应答。
 - field：无符号整数按 offset/length/endian 取 raw，`value = raw*gain+bias`（`raw="true"` 跳过换算）；越界 E305（可重试）。浮点结果经 `_round_engineering` 消除尾数噪声。
+- 人工判定：`<limit mode="manual" prompt="...">` 经 `EngineListener.on_manual_judge` 回调（UI 弹窗 / CLI 询问），True/False/None → PASS/FAIL/ABORT；不重试；结果 `judge_mode="manual"`。
+- 文件传输：`<send mode="file">` 按 header+序号+分块逐帧发；`<wait mode="file">` 以 size/chunks/idle_gap 终止并原子落盘，可选 checksum；失败 E308（可重试）。
+- 连接：`<connect protocol="can/serial/modbus/usb/mock" ...>` 脚本参数覆盖工位配置；未给 protocol 时资源必须在工位配置中（否则 E204）。
 - 变量为 Run 级全局，`${name}` 仅简单取值，无表达式；解析期做"定义先于引用"检查。
 - 结果文件每步完成即整体覆写（临时文件 + `os.replace` 原子替换 + fsync）；启动时 `FileResultStore.recover_aborted()` 把缺 `result` 字段的残留文件标记为 ABORT；同名 SN 用时间戳 + 序号保证永不覆盖历史。
 

@@ -38,7 +38,9 @@ class _Runner(QObject):
         try:
             parser = ScriptParser(
                 station_resources=self.config.resource_names(),
-                allowed_extensions=set(self.config.extensions_allowed))
+                allowed_extensions=set(self.config.extensions_allowed),
+                station_protocols={name: spec.type
+                                   for name, spec in self.config.resources.items()})
             script = parser.parse_file(self.script_path)
 
             store = FileResultStore(self.result_dir, mes_enabled=self.config.mes.enabled)

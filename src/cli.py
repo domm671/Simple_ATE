@@ -25,6 +25,24 @@ class CliListener(EngineListener):
     def __init__(self, logger: logging.Logger):
         self.logger = logger
 
+    def on_manual_judge(self, request):
+        """无头模式：在终端询问操作员；非交互式环境返回 None（中止）。"""
+        prompt = f"人工判定 [{request.step_name}]：{request.prompt}"
+        if request.value is not None:
+            prompt += f"（当前值 {request.value}{request.unit or ''}）"
+        if not sys.stdin or not sys.stdin.isatty():
+            self.logger.error(f"{prompt} —— 非交互式环境，无法人工判定，中止")
+            return None
+        try:
+            answer = input(prompt + " [y=合格 / n=不合格 / 其它=中止] ").strip().lower()
+        except EOFError:
+            return None
+        if answer in ("y", "yes", "1"):
+            return True
+        if answer in ("n", "no", "0"):
+            return False
+        return None
+
     def on_run_start(self, ctx, script):
         self.logger.info(f"脚本 {script.name} v{script.version}，sha256={script.sha256[:12]}…")
 
@@ -60,7 +78,9 @@ def _cmd_run(args) -> int:
     script_path = Path(args.script)
     parser = ScriptParser(
         station_resources=cfg.resource_names(),
-        allowed_extensions=set(cfg.extensions_allowed))
+        allowed_extensions=set(cfg.extensions_allowed),
+        station_protocols={name: spec.type
+                           for name, spec in cfg.resources.items()})
     script = parser.parse_file(str(script_path))
 
     store = FileResultStore(result_dir, mes_enabled=cfg.mes.enabled)

@@ -168,6 +168,46 @@ class TestMainWindow(unittest.TestCase):
         self._wait_idle(10.0)
         self.assertIn("PASS", self.win.result_label.text())
 
+    # ------------------------------------------------------------ 人工判定
+    def test_manual_judge_pass(self):
+        script = self.tmp / "manual.xml"
+        script.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<test name="MANUAL" version="1.0"><connect resource="can_main"/>'
+            '<step name="Led" timeout="1" retry="0" on_fail="continue">'
+            '<send id="0x18FF50E5" ext="true" data="01 00"/>'
+            '<wait id="0x18FF50E6" ext="true"/>'
+            '<limit mode="manual" prompt="LED 是否亮绿？"/></step></test>',
+            encoding="utf-8")
+        self.win.script_combo.insertItem(0, "manual.xml", str(script))
+        self.win.script_combo.setCurrentIndex(0)
+        # 替换弹窗，避免 offscreen 下模态框阻塞
+        self.win._ask_manual_judge = lambda request: True
+        self.win.sn_edit.setText("BMS_MANUAL_001")
+        self.win._on_start()
+        self.assertEqual(self.win.state, RUNNING)
+        self._wait_idle(10.0)
+        self.assertIn("PASS", self.win.result_label.text())
+        self.assertEqual(self.win.table.item(0, 5).text(), "PASS")
+
+    def test_manual_judge_fail(self):
+        script = self.tmp / "manual2.xml"
+        script.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<test name="MANUAL2" version="1.0"><connect resource="can_main"/>'
+            '<step name="Led" timeout="1" retry="0" on_fail="continue">'
+            '<send id="0x18FF50E5" ext="true" data="01 00"/>'
+            '<wait id="0x18FF50E6" ext="true"/>'
+            '<limit mode="manual" prompt="LED 是否亮绿？"/></step></test>',
+            encoding="utf-8")
+        self.win.script_combo.insertItem(0, "manual2.xml", str(script))
+        self.win.script_combo.setCurrentIndex(0)
+        self.win._ask_manual_judge = lambda request: False
+        self.win.sn_edit.setText("BMS_MANUAL_002")
+        self.win._on_start()
+        self._wait_idle(10.0)
+        self.assertIn("FAIL", self.win.result_label.text())
+
     def _wait_idle(self, seconds: float):
         import time
         end = time.monotonic() + seconds

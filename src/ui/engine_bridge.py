@@ -10,10 +10,12 @@
 
 from __future__ import annotations
 
+import threading
+
 from PySide6.QtCore import QObject, Signal
 
 from ..engine import EngineListener
-from ..engine.model import ItemResult, Script, Step
+from ..engine.model import ItemResult, ManualJudgeRequest, Script, Step
 from ..communication.base import Frame
 from ..storage.base import RunResult
 
@@ -28,10 +30,34 @@ class EngineBridge(QObject, EngineListener):
     # ---- 日志 / trace ----
     logMessage = Signal(str, str)                     # level, message
     traceFrame = Signal(str, str, str)                # direction(TX/RX), resource, 帧摘要
+    manualJudgeRequested = Signal(object)             # ManualJudgeRequest
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._judge_event: threading.Event | None = None
+        self._judge_decision: bool | None = None
 
     # ------------------------------------------------------------ 回调（工作线程）
     def on_run_start(self, ctx, script: Script) -> None:
         self.runStarted.emit(ctx.sn, script.name, script.version)
+
+    def on_manual_judge(self, request: ManualJudgeRequest) -> bool | None:
+        """工作线程被引擎回调：发信号请主线程弹窗，并阻塞等待操作员结果。
+
+        Qt 自动以 queued connection 把信号投递到主线程；主线程弹窗后调用
+        resolve_manual_judge() 置位本事件，工作线程随即返回。
+        """
+        self._judge_decision = None
+        self._judge_event = threading.Event()
+        self.manualJudgeRequested.emit(request)
+        self._judge_event.wait()
+        return self._judge_decision
+
+    def resolve_manual_judge(self, decision: bool | None) -> None:
+        """主线程在弹窗结束后回填结果。"""
+        self._judge_decision = decision
+        if self._judge_event is not None:
+            self._judge_event.set()
 
     def on_run_finish(self, result: RunResult) -> None:
         self.runFinished.emit(result)

@@ -37,9 +37,13 @@ Qt Signal（自动 QueuedConnection）投递回主线程刷新控件
 
 - `EngineBridge(QObject, EngineListener)`：在工作线程被引擎回调；
 - 把事件转为信号：`runStarted/runFinished/stepStarted/stepFinished/
-  logMessage/traceFrame`；
-- **只传快照与基本类型**（ItemResult、RunResult、字符串），不传 RunContext
-  等带资源句柄的对象，避免跨线程共享可变状态。
+  logMessage/traceFrame/manualJudgeRequested`；
+- **只传快照与基本类型**（ItemResult、RunResult、ManualJudgeRequest、字符串），
+  不传 RunContext 等带资源句柄的对象，避免跨线程共享可变状态；
+- **人工判定**：`on_manual_judge(request)` 在工作线程被引擎回调，
+  发 `manualJudgeRequested` 信号后阻塞在 `threading.Event`；
+  主线程弹窗完成时调 `resolve_manual_judge(decision)` 置位事件，
+  工作线程随即返回 True/False/None。
 
 ### 3.2 worker.py（线程管理）
 
@@ -59,6 +63,9 @@ Qt Signal（自动 QueuedConnection）投递回主线程刷新控件
 - 结果配色：PASS 绿 / FAIL 红 / ERROR 黄（琥珀）/ ABORT 灰；
 - Run 结束后回到 IDLE、刷新“待传 MES”计数、**清空 SN 并聚焦**，支持连续扫码；
 - 提示用非阻塞方式（`_notify` 状态栏），避免模态框卡住产线；
+- **人工判定弹窗**（`_ask_manual_judge`）：显示测试项/提示/当前值，
+  提供 合格(Yes) / 不合格(No) / 中止(Cancel)，选择结果回填给阻塞的工作线程；
+  该方法独立成函数以便自动化测试替换；
 - 关闭窗口时若仍在运行，先请求停止并等待线程安全退出；
 - trace 不显示在主日志区（仅留钩子）。
 
@@ -68,6 +75,8 @@ Qt Signal（自动 QueuedConnection）投递回主线程刷新控件
   QTreeWidget + 动态属性表单），切换页签互相同步；
 - 图形页支持按容器规则添加/删除/上移/下移节点（connect/step/send/wait/
   field/limit/action/delay），action 额外入参以 `key=value` 逐行编辑；
+  属性表单已覆盖串口/Modbus/USB 连接参数、文件传输（`mode=file`）、
+  人工判定（`mode=manual`）等新属性；
 - 保存前复用 `ScriptParser` 做全量静态校验，错误码/行列/说明一次列出，
   校验不过不写文件；
 - **已知约束**：经图形页往返会丢失 XML 注释（界面中有提示）。

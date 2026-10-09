@@ -11,6 +11,7 @@ dependencies = []
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.5"]
+serial = ["pyserial>=3.5"]
 
 [project.scripts]
 simple-ate = "simple_ate.cli:main"

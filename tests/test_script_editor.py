@@ -294,5 +294,46 @@ class TestSave(unittest.TestCase):
         dlg.deleteLater()
 
 
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "未安装 PySide6，跳过脚本编辑器测试")
+class TestNewAttributes(unittest.TestCase):
+    def test_attr_spec_covers_new_features(self):
+        from simple_ate.ui.script_editor import ATTR_SPEC, _ENUM_OPTIONS
+        self.assertIn("protocol", {a[0] for a in ATTR_SPEC["connect"]})
+        self.assertIn("port", {a[0] for a in ATTR_SPEC["connect"]})
+        self.assertIn("unit", {a[0] for a in ATTR_SPEC["connect"]})
+        self.assertIn("mode", {a[0] for a in ATTR_SPEC["send"]})
+        self.assertIn("file", {a[0] for a in ATTR_SPEC["send"]})
+        self.assertIn("chunk_size", {a[0] for a in ATTR_SPEC["send"]})
+        self.assertIn("size", {a[0] for a in ATTR_SPEC["wait"]})
+        self.assertIn("checksum", {a[0] for a in ATTR_SPEC["wait"]})
+        self.assertIn("manual", [v for v, _ in _ENUM_OPTIONS["limitmode"]])
+
+    def test_new_attrs_roundtrip_and_validate(self):
+        xml = (
+            '<?xml version="1.0"?>'
+            '<test name="T" version="1.0">'
+            '<connect resource="rs485" protocol="serial" port="COM7" '
+            'baudrate="115200"/>'
+            '<step name="S" resource="rs485">'
+            '<send id="0" mode="file" file="fw.bin" chunk_size="256" '
+            'seq_len="2"/>'
+            '<wait id="0" mode="file" file="out.bin" chunk_size="256" '
+            'seq_len="2" size="1024" checksum="crc32"/>'
+            '</step></test>')
+        cfg = load_config(CONFIG)
+        dlg = ScriptEditorDialog(cfg, path=None)
+        dlg.xml_edit.setPlainText(xml)
+        self.assertEqual(dlg.validate_text(dlg._current_text()), "")
+        self.assertTrue(dlg._sync_text_to_graph())
+        dlg.tabs.setCurrentIndex(0)              # 图形 -> XML
+        out = dlg.xml_edit.toPlainText()
+
+        def shape(text):
+            r = ET.fromstring(text)
+            return [(e.tag, tuple(sorted(e.attrib.items()))) for e in r.iter()]
+        self.assertEqual(shape(xml), shape(out))
+        dlg.deleteLater()
+
+
 if __name__ == "__main__":
     unittest.main()

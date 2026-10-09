@@ -336,6 +336,7 @@ class MainWindow(QMainWindow):
         self.bridge.stepFinished.connect(self._on_step_finished)
         self.bridge.logMessage.connect(self._append_log)
         self.bridge.traceFrame.connect(self._on_trace)
+        self.bridge.manualJudgeRequested.connect(self._on_manual_judge_requested)
 
     def _on_run_started(self, sn: str, name: str, version: str) -> None:
         self.status_label.setText(f"运行中：{name} v{version} ｜ SN {sn}")
@@ -375,6 +376,41 @@ class MainWindow(QMainWindow):
     def _on_trace(self, direction: str, resource: str, summary: str) -> None:
         # trace 不进 UI 主日志区（规范：trace 只写文件）；这里仅留调试钩子，默认不显示
         pass
+
+    # ============================================================ 人工判定
+    def _on_manual_judge_requested(self, request) -> None:
+        """主线程槽：弹出人工判定对话框，并把结果回填给阻塞中的工作线程。"""
+        self.status_label.setText(f"等待人工判定：{request.step_name}")
+        self.detail_label.setText(request.prompt or request.step_name)
+        decision = self._ask_manual_judge(request)
+        self.detail_label.setText("")
+        if self.bridge is not None:
+            self.bridge.resolve_manual_judge(decision)
+
+    def _ask_manual_judge(self, request) -> bool | None:
+        """人工判定弹窗：合格=True / 不合格=False / 关闭或中止=None。
+
+        独立成方法便于自动化测试替换（不真正弹模态框）。
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("人工判定")
+        box.setIcon(QMessageBox.Question)
+        box.setText(request.prompt or request.step_name)
+        detail = f"测试项：{request.step_name}"
+        if request.value is not None:
+            detail += f"\n当前值：{request.value}{request.unit or ''}"
+        box.setInformativeText(detail)
+        btn_yes = box.addButton("合格 (Yes)", QMessageBox.YesRole)
+        btn_no = box.addButton("不合格 (No)", QMessageBox.NoRole)
+        box.addButton("中止 (Cancel)", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_yes)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_yes:
+            return True
+        if clicked is btn_no:
+            return False
+        return None
 
     # ============================================================ 结束
     def _on_run_finished(self, result: RunResult) -> None:
