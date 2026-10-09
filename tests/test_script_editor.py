@@ -308,6 +308,50 @@ class TestNewAttributes(unittest.TestCase):
         self.assertIn("checksum", {a[0] for a in ATTR_SPEC["wait"]})
         self.assertIn("manual", [v for v, _ in _ENUM_OPTIONS["limitmode"]])
 
+    def test_limit_mode_dynamic_fields(self):
+        dlg = make_dlg()
+        dlg.tabs.setCurrentIndex(1)
+        limit_item = None
+
+        def walk(it):
+            nonlocal limit_item
+            el = it.data(0, Qt.UserRole)
+            if el is not None and el.tag == "limit":
+                limit_item = it
+            for i in range(it.childCount()):
+                walk(it.child(i))
+
+        walk(dlg.tree.topLevelItem(0))
+        self.assertIsNotNone(limit_item)
+        dlg.tree.setCurrentItem(limit_item)
+        limit_el = limit_item.data(0, Qt.UserRole)
+
+        # 默认 auto：min/max/eq 可见，prompt 隐藏
+        self.assertFalse(dlg._form_widgets["min"].isHidden())
+        self.assertFalse(dlg._form_widgets["eq"].isHidden())
+        self.assertTrue(dlg._form_widgets["prompt"].isHidden())
+
+        # 切换到 manual：隐藏 min/max/eq，显示 prompt，并从元素中移除互斥属性
+        mode = dlg._form_widgets["mode"]
+        mode.setCurrentIndex(mode.findData("manual"))
+        self.assertTrue(dlg._form_widgets["min"].isHidden())
+        self.assertTrue(dlg._form_widgets["max"].isHidden())
+        self.assertTrue(dlg._form_widgets["eq"].isHidden())
+        self.assertFalse(dlg._form_widgets["prompt"].isHidden())
+        self.assertNotIn("min", limit_el.attrib)
+        self.assertNotIn("max", limit_el.attrib)
+        self.assertEqual(limit_el.get("mode"), "manual")
+        self.assertEqual(limit_el.get("value"), "${relay_st}")
+        # 序列化后所有 manual limit 均不含 min/max
+        out = dlg._current_text()
+        manual_limits = [e for e in ET.fromstring(out).iter("limit")
+                         if e.get("mode") == "manual"]
+        self.assertTrue(manual_limits)
+        for ml in manual_limits:
+            self.assertNotIn("min", ml.attrib)
+            self.assertNotIn("max", ml.attrib)
+        dlg.deleteLater()
+
     def test_new_attrs_roundtrip_and_validate(self):
         xml = (
             '<?xml version="1.0"?>'

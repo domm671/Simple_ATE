@@ -165,6 +165,10 @@ CHILD_TAGS: dict[str, tuple[str, ...]] = {
 }
 STEP_CHILD_TAGS = set(CHILD_TAGS["step"])
 
+# <limit> 两种判定方式各自可见/可保存的属性；切换方式时动态显隐并清理互斥属性
+LIMIT_AUTO_ATTRS = ("value", "min", "max", "eq", "unit")
+LIMIT_MANUAL_ATTRS = ("value", "prompt", "unit")
+
 _ENUM_OPTIONS = {
     "bool": (("", "（默认）"), ("true", "true"), ("false", "false")),
     "endian": (("", "（默认 little）"), ("little", "little 小端"), ("big", "big 大端")),
@@ -300,6 +304,8 @@ class ScriptEditorDialog(QDialog):
         self.root: ET.Element | None = None
         self._dirty = False
         self._form_widgets: dict[str, QWidget] = {}
+        self._form_layout: QFormLayout | None = None
+        self._limit_el: ET.Element | None = None
 
         first_resource = next(iter(config.resources), "")
         if path is not None:
@@ -612,6 +618,7 @@ class ScriptEditorDialog(QDialog):
         # 先把旧表单对旧元素的修改保存（正常选择切换时旧表单仍显示旧值）
         self._form_widgets = {}
         self.action_extra = None
+        self._limit_el = None
 
         old = self.form_scroll.takeWidget()
         if old is not None:
@@ -622,6 +629,7 @@ class ScriptEditorDialog(QDialog):
         form.setLabelAlignment(Qt.AlignRight)
         self.form_scroll.setWidget(holder)
         self.form_holder = holder
+        self._form_layout = form
 
         if el is None:
             self.node_title.setText("请选择左侧节点")
@@ -635,6 +643,15 @@ class ScriptEditorDialog(QDialog):
             mark = "* " if required else ""
             form.addRow(mark + label, widget)
             self._form_widgets[attr] = widget
+
+        # <limit>：根据「判定方式」动态显隐输入项，避免人工判定时还要求填 min/max/eq
+        if el.tag == "limit":
+            self._limit_el = el
+            mode_widget = self._form_widgets.get("mode")
+            if mode_widget is not None:
+                self._connect_widget(
+                    mode_widget, lambda _v=None: self._on_limit_mode_changed())
+            self._apply_limit_row_visibility()
 
         # action 的扩展入参：白名单外的任意属性，每行 key=value
         if el.tag == "action":
@@ -681,6 +698,24 @@ class ScriptEditorDialog(QDialog):
             el = item.data(0, Qt.UserRole)
             item.setText(0, node_label(el))
 
+    def _on_limit_mode_changed(self) -> None:
+        """切换 auto/manual 后：清理互斥属性并显隐对应输入项。"""
+        self._apply_form_to_element()
+        self._apply_limit_row_visibility()
+        self._dirty = True
+
+    def _apply_limit_row_visibility(self) -> None:
+        """按当前 mode 显隐 <limit> 表单行。"""
+        if self._limit_el is None or self._form_layout is None:
+            return
+        mode_widget = self._form_widgets.get("mode")
+        mode = self._widget_value(mode_widget) if mode_widget is not None else "auto"
+        visible = LIMIT_MANUAL_ATTRS if mode == "manual" else LIMIT_AUTO_ATTRS
+        for attr, widget in self._form_widgets.items():
+            if attr == "mode":
+                continue
+            self._form_layout.setRowVisible(widget, attr in visible)
+
     def _apply_form_to_element(self) -> None:
         item = self.tree.currentItem() if hasattr(self, "tree") else None
         if item is None:
@@ -692,6 +727,14 @@ class ScriptEditorDialog(QDialog):
                 el.attrib.pop(attr, None)
             else:
                 el.set(attr, value)
+        if el.tag == "limit":
+            # 只保留当前判定方式允许的属性，避免隐藏项残留导致 E120
+            mode_widget = self._form_widgets.get("mode")
+            mode = self._widget_value(mode_widget) if mode_widget is not None else "auto"
+            allowed = set(LIMIT_MANUAL_ATTRS if mode == "manual" else LIMIT_AUTO_ATTRS)
+            for attr in list(el.attrib):
+                if attr != "mode" and attr not in allowed:
+                    del el.attrib[attr]
         if el.tag == "action" and self.action_extra is not None:
             for k in list(el.attrib):
                 if k not in ("handler", "var"):

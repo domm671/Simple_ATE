@@ -77,6 +77,9 @@ Qt Signal（自动 QueuedConnection）投递回主线程刷新控件
   field/limit/action/delay），action 额外入参以 `key=value` 逐行编辑；
   属性表单已覆盖串口/Modbus/USB 连接参数、文件传输（`mode=file`）、
   人工判定（`mode=manual`）等新属性；
+- **`<limit>` 表单随判定方式联动**：`mode=auto` 只显示 `value/min/max/eq/unit`，
+  `mode=manual` 只显示 `value/prompt/unit`；切换时隐藏行并自动从元素中
+  清除互斥属性（避免隐藏的 min/max/eq 残留导致 E120）；
 - 保存前复用 `ScriptParser` 做全量静态校验，错误码/行列/说明一次列出，
   校验不过不写文件；
 - **已知约束**：经图形页往返会丢失 XML 注释（界面中有提示）。
