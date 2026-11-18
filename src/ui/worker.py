@@ -2,14 +2,28 @@
 
 from __future__ import annotations
 
+import logging
+import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 
 from ..config_loader import StationConfig
 from ..engine import Engine
 from ..engine.parser import ScriptParser
+from ..logging_conf.logger import run_logging, trace_path_for
+from ..storage.base import RunResult
 from ..storage.file_store import FileResultStore
+from .engine_bridge import EngineBridge
+
+
+class _BridgeLogHandler(logging.Handler):
+    def __init__(self, bridge: EngineBridge):
+        super().__init__()
+        self.bridge = bridge
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.bridge.on_log(record.levelname.lower(), self.format(record))
 
 
 class _Runner(QObject):
@@ -19,7 +33,7 @@ class _Runner(QObject):
     failed = Signal(str)                      # 启动/解析阶段错误信息
 
     def __init__(self, config: StationConfig, script_path: str, sn: str,
-                 bridge, log_dir: Path, result_dir: Path):
+                 bridge: EngineBridge, log_dir: Path, result_dir: Path):
         super().__init__()
         self.config = config
         self.script_path = script_path
@@ -27,13 +41,10 @@ class _Runner(QObject):
         self.bridge = bridge
         self.log_dir = log_dir
         self.result_dir = result_dir
-        self.engine: Engine | None = None
-
-    def request_stop(self) -> None:
-        if self.engine is not None:
-            self.engine.request_stop()
+        self.stop_event = threading.Event()
 
     # ------------------------------------------------------------ 槽（工作线程执行）
+    @Slot()
     def run(self) -> None:
         try:
             parser = ScriptParser(
@@ -43,18 +54,14 @@ class _Runner(QObject):
                                    for name, spec in self.config.resources.items()})
             script = parser.parse_file(self.script_path)
 
-            store = FileResultStore(self.result_dir, mes_enabled=self.config.mes.enabled)
-            self.engine = Engine(
-                config=self.config, store=store, listener=self.bridge,
-                extensions_dir=self.config.base_dir / self.config.extensions_dir)
-
-            from datetime import datetime
-            trace_dir = self.log_dir / "trace"
-            trace_dir.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            trace_path = trace_dir / f"trace_{self.sn}_{stamp}.log"
-
-            result = self.engine.run(script, sn=self.sn, trace_path=trace_path)
+            with run_logging(self.log_dir, console=False) as (logger, log_path):
+                logger.addHandler(_BridgeLogHandler(self.bridge))
+                store = FileResultStore(self.result_dir, mes_enabled=self.config.mes.enabled)
+                engine = Engine(
+                    config=self.config, store=store, listener=self.bridge,
+                    extensions_dir=self.config.resolve_path(self.config.extensions_dir),
+                    stop_event=self.stop_event, logger=logger)
+                result = engine.run(script, sn=self.sn, trace_path=trace_path_for(log_path, self.sn))
             self.finished.emit(result)
         except Exception as exc:  # noqa: BLE001 - 任何启动/解析错误回传 UI
             self.failed.emit(str(exc))
@@ -67,32 +74,44 @@ class RunWorker(QObject):
     failed = Signal(str)
 
     def __init__(self, config: StationConfig, script_path: str, sn: str,
-                 bridge, log_dir: Path, result_dir: Path):
+                 bridge: EngineBridge, log_dir: Path, result_dir: Path):
         super().__init__()
-        self.thread = QThread()
+        self.thread = QThread(self)
+        self.bridge = bridge
         self.runner = _Runner(config, script_path, sn, bridge, log_dir, result_dir)
+        self.stop_event = self.runner.stop_event
+        self._result: RunResult | None = None
+        self._error = ""
         self.runner.moveToThread(self.thread)
 
         self.thread.started.connect(self.runner.run)
         self.runner.finished.connect(self._on_finished)
         self.runner.failed.connect(self._on_failed)
         # 结束后自动退出线程并释放
-        self.runner.finished.connect(self.thread.quit)
-        self.runner.failed.connect(self.thread.quit)
+        self.runner.finished.connect(self.thread.quit, Qt.ConnectionType.DirectConnection)
+        self.runner.failed.connect(self.thread.quit, Qt.ConnectionType.DirectConnection)
         self.thread.finished.connect(self.runner.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.finished.connect(self._on_thread_finished)
 
     def start(self) -> None:
         self.thread.start()
 
     def request_stop(self) -> None:
-        self.runner.request_stop()
+        self.stop_event.set()
+        self.bridge.cancel_manual_judge()
 
-    def wait(self, ms: int = 5000) -> None:
-        self.thread.wait(ms)
+    @Slot(object)
+    def _on_finished(self, result: RunResult) -> None:
+        self._result = result
 
-    def _on_finished(self, result) -> None:
-        self.finished.emit(result)
-
+    @Slot(str)
     def _on_failed(self, message: str) -> None:
-        self.failed.emit(message)
+        self._error = message
+
+    @Slot()
+    def _on_thread_finished(self) -> None:
+        if self._result is not None:
+            self.finished.emit(self._result)
+        else:
+            self.failed.emit(self._error)
+        self.deleteLater()

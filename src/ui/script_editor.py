@@ -15,8 +15,9 @@ from __future__ import annotations
 import copy
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from xml.sax.saxutils import quoteattr
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QIODevice, QSaveFile, Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -164,8 +165,6 @@ CHILD_TAGS: dict[str, tuple[str, ...]] = {
     "step": ("send", "wait", "delay", "action", "limit"),
     "wait": ("field",),
 }
-STEP_CHILD_TAGS = set(CHILD_TAGS["step"])
-
 # <limit> 两种判定方式各自可见/可保存的属性；切换方式时动态显隐并清理互斥属性
 LIMIT_AUTO_ATTRS = ("value", "min", "max", "eq", "unit")
 LIMIT_MANUAL_ATTRS = ("value", "prompt", "unit")
@@ -231,16 +230,17 @@ XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8"?>\n'
 
 def new_script_template(resource: str = "") -> str:
     """新建脚本的初始内容。"""
-    res = resource or "can_main"
+    res = quoteattr(resource or "can_main")
+    protocol = ' protocol="mock"' if not resource else ""
     return (
         XML_DECLARATION
         + f"""<test name="NEW_SCRIPT" version="1.0">
-    <connect resource="{res}"/>
+    <connect resource={res}{protocol}/>
     <step name="Step1" timeout="2" retry="1" on_fail="abort">
         <send id="0x100" data="01"/>
         <wait id="0x101"/>
     </step>
-    <disconnect resource="{res}"/>
+    <disconnect resource={res}/>
 </test>
 """
     )
@@ -321,7 +321,6 @@ class ScriptEditorDialog(QDialog):
         self.path = path
         self.saved_path: Path | None = None
         self.root: ET.Element | None = None
-        self._dirty = False
         self._form_widgets: dict[str, QWidget] = {}
         self._form_layout: QFormLayout | None = None
         self._limit_el: ET.Element | None = None
@@ -475,7 +474,6 @@ class ScriptEditorDialog(QDialog):
     def _sync_graph_to_text(self) -> None:
         if self.root is None:
             return
-        self._apply_form_to_element()           # 属性表单可能有未保存编辑
         self.xml_edit.blockSignals(True)
         self.xml_edit.setPlainText(serialize(copy.deepcopy(self.root)))
         self.xml_edit.blockSignals(False)
@@ -570,10 +568,14 @@ class ScriptEditorDialog(QDialog):
         if info is None:
             self.add_combo.setEnabled(False)
             return
-        _, kind = info
+        container, kind = info
         for tag in CHILD_TAGS[kind]:
+            if tag == "limit" and container.find("limit") is not None:
+                continue
+            if tag == "field" and container.get("mode", "").strip().lower() == "file":
+                continue
             self.add_combo.addItem(f"{TAG_CN[tag]} <{tag}>", tag)
-        self.add_combo.setEnabled(True)
+        self.add_combo.setEnabled(bool(self.add_combo.count()))
 
     # ============================================================ 结构操作
     def _add_node(self) -> None:
@@ -591,8 +593,12 @@ class ScriptEditorDialog(QDialog):
         # 新建测试步自动带一个等待指令，保证至少含一条通信指令（否则 E108）
         if tag == "step":
             new_el.append(ET.Element("wait", attrib={"id": "0x100"}))
+            index = len(container)
+            while index and container[index - 1].tag == "disconnect":
+                index -= 1
+            container.insert(index, new_el)
         # limit 必须在最后；其它指令若已有 limit，则插到 limit 之前
-        if tag == "limit":
+        elif tag == "limit":
             container.append(new_el)
         elif len(container) and container[-1].tag == "limit":
             container.insert(len(container) - 1, new_el)
@@ -629,6 +635,8 @@ class ScriptEditorDialog(QDialog):
         new_idx = idx + delta
         if not 0 <= new_idx < len(parent_el):
             return
+        if el.tag == "limit" or parent_el[new_idx].tag == "limit":
+            return
         parent_el.remove(el)
         parent_el.insert(new_idx, el)
         self._dirty = True
@@ -636,7 +644,6 @@ class ScriptEditorDialog(QDialog):
 
     # ============================================================ 属性表单
     def _rebuild_form(self, el: ET.Element | None) -> None:
-        # 先把旧表单对旧元素的修改保存（正常选择切换时旧表单仍显示旧值）
         self._form_widgets = {}
         self.action_extra = None
         self._limit_el = None
@@ -662,7 +669,7 @@ class ScriptEditorDialog(QDialog):
         for attr, label, kind, required in ATTR_SPEC.get(el.tag, []):
             widget = self._make_value_widget(kind)
             self._set_widget_value(widget, kind, el.attrib.get(attr, ""))
-            self._connect_widget(widget, lambda _v=None: self._on_form_edited())
+            self._connect_widget(widget, lambda _v=None, key=attr: self._on_form_edited(key))
             mark = "* " if required else ""
             form.addRow(mark + label, widget)
             self._form_widgets[attr] = widget
@@ -670,20 +677,11 @@ class ScriptEditorDialog(QDialog):
         # <limit>：根据「判定方式」动态显隐输入项，避免人工判定时还要求填 min/max/eq
         if el.tag == "limit":
             self._limit_el = el
-            mode_widget = self._form_widgets.get("mode")
-            if mode_widget is not None:
-                self._connect_widget(
-                    mode_widget, lambda _v=None: self._on_limit_mode_changed())
             self._apply_limit_row_visibility()
 
         # <connect>：根据「协议」（modbus 再按 mode）动态显隐连接参数
         if el.tag == "connect":
             self._connect_el = el
-            for key in ("protocol", "modbus_mode", "resource"):
-                widget = self._form_widgets.get(key)
-                if widget is not None:
-                    self._connect_widget(
-                        widget, lambda _v=None: self._on_connect_changed())
             self._connect_hint = QLabel("")
             self._connect_hint.setWordWrap(True)
             self._connect_hint.setStyleSheet("color:#806000;")
@@ -697,7 +695,7 @@ class ScriptEditorDialog(QDialog):
             lines = [f"{k}={v}" for k, v in el.attrib.items()
                      if k not in ("handler", "var")]
             self.action_extra.setPlainText("\n".join(lines))
-            self.action_extra.textChanged.connect(self._on_form_edited)
+            self.action_extra.textChanged.connect(self._on_action_args_edited)
             form.addRow("扩展入参（每行 key=value）", self.action_extra)
 
     def _make_value_widget(self, kind: str) -> QWidget:
@@ -711,8 +709,14 @@ class ScriptEditorDialog(QDialog):
 
     def _set_widget_value(self, widget: QWidget, kind: str, value: str) -> None:
         if isinstance(widget, QComboBox):
-            idx = widget.findData(value)
-            widget.setCurrentIndex(idx if idx >= 0 else 0)
+            canonical = value.strip().lower()
+            if kind == "bool":
+                canonical = {"0": "false", "1": "true"}.get(canonical, canonical)
+            idx = widget.findData(canonical)
+            if idx < 0:
+                widget.addItem(value, value)
+                idx = widget.count() - 1
+            widget.setCurrentIndex(idx)
         else:
             widget.setText(value)
 
@@ -727,19 +731,40 @@ class ScriptEditorDialog(QDialog):
         else:
             widget.textChanged.connect(slot)
 
-    def _on_form_edited(self) -> None:
-        self._apply_form_to_element()
+    def _on_form_edited(self, attr: str) -> None:
+        item, el = self._current()
+        if item is None or el is None:
+            return
+        value = self._widget_value(self._form_widgets[attr])
+        if value:
+            el.set(attr, value)
+        else:
+            el.attrib.pop(attr, None)
+        if el.tag == "limit" and attr == "mode":
+            conflicts = ("min", "max", "eq") if value == "manual" else ("prompt",)
+            self._clear_form_attrs(el, conflicts)
+            self._apply_limit_row_visibility()
+        if el.tag == "connect" and attr in ("protocol", "modbus_mode", "resource"):
+            if attr != "resource" and el.get("protocol"):
+                allowed = self._connect_visible_attrs(self._effective_connect_protocol())
+                self._clear_form_attrs(el, tuple(self._form_widgets.keys() - allowed))
+            self._apply_connect_row_visibility()
+        if el.tag == "wait" and attr == "mode":
+            self._refresh_add_combo(item)
+        item.setText(0, node_label(el))
+        self.error_view.clear()
         self._dirty = True
-        item, _el = self._current()
-        if item is not None:
-            el = item.data(0, Qt.UserRole)
-            item.setText(0, node_label(el))
 
-    def _on_limit_mode_changed(self) -> None:
-        """切换 auto/manual 后：清理互斥属性并显隐对应输入项。"""
-        self._apply_form_to_element()
-        self._apply_limit_row_visibility()
-        self._dirty = True
+    def _clear_form_attrs(self, el: ET.Element, attrs: tuple[str, ...]) -> None:
+        for attr in attrs:
+            el.attrib.pop(attr, None)
+            widget = self._form_widgets[attr]
+            previous = widget.blockSignals(True)
+            if isinstance(widget, QComboBox):
+                widget.setCurrentIndex(0)
+            else:
+                widget.clear()
+            widget.blockSignals(previous)
 
     def _apply_limit_row_visibility(self) -> None:
         """按当前 mode 显隐 <limit> 表单行。"""
@@ -754,15 +779,6 @@ class ScriptEditorDialog(QDialog):
             self._form_layout.setRowVisible(widget, attr in visible)
 
     # ------------------------------------------------------ <connect> 联动
-    def _on_connect_changed(self) -> None:
-        """切换协议/Modbus 模式/资源后：清理跨协议属性并显隐对应输入项。"""
-        self._apply_form_to_element()
-        self._apply_connect_row_visibility()
-        self._dirty = True
-        item, _el = self._current()
-        if item is not None:
-            item.setText(0, node_label(item.data(0, Qt.UserRole)))
-
     def _effective_connect_protocol(self) -> str:
         """生效协议：脚本显式 protocol 优先；否则回退到工位配置的资源 type。"""
         proto_widget = self._form_widgets.get("protocol")
@@ -779,6 +795,10 @@ class ScriptEditorDialog(QDialog):
         if proto == "modbus":
             mode_widget = self._form_widgets.get("modbus_mode")
             mode = self._widget_value(mode_widget) if mode_widget is not None else ""
+            if not mode and self._connect_el is not None:
+                spec = self.config.resources.get(self._connect_el.get("resource", ""))
+                if spec is not None:
+                    mode = spec.options.get("modbus_mode", "")
             attrs |= set(_MODBUS_TCP_ATTRS if mode == "tcp" else _MODBUS_SERIAL_ATTRS)
         else:
             attrs |= set(CONNECT_PROTO_ATTRS.get(proto, ()))
@@ -807,52 +827,23 @@ class ScriptEditorDialog(QDialog):
             else:
                 self._connect_hint.setText("")
 
-    def _apply_form_to_element(self) -> None:
-        item = self.tree.currentItem() if hasattr(self, "tree") else None
-        if item is None:
+    def _on_action_args_edited(self) -> None:
+        _, el = self._current()
+        if el is None or self.action_extra is None:
             return
-        el = item.data(0, Qt.UserRole)
-        for attr, widget in self._form_widgets.items():
-            value = self._widget_value(widget)
-            if value == "":
-                el.attrib.pop(attr, None)
-            else:
-                el.set(attr, value)
-        if el.tag == "limit":
-            # 只保留当前判定方式允许的属性，避免隐藏项残留导致 E120
-            mode_widget = self._form_widgets.get("mode")
-            mode = self._widget_value(mode_widget) if mode_widget is not None else "auto"
-            allowed = set(LIMIT_MANUAL_ATTRS if mode == "manual" else LIMIT_AUTO_ATTRS)
-            for attr in list(el.attrib):
-                if attr != "mode" and attr not in allowed:
-                    del el.attrib[attr]
-        if el.tag == "connect":
-            # 仅在脚本显式指定 protocol 时清理不属于该协议的属性；
-            # protocol 为空（走工位配置）时保留用户手写的参数覆盖。
-            proto_widget = self._form_widgets.get("protocol")
-            proto = self._widget_value(proto_widget) if proto_widget is not None else ""
-            if proto:
-                allowed = self._connect_visible_attrs(proto)
-                for attr in list(el.attrib):
-                    if attr not in allowed:
-                        del el.attrib[attr]
-        if el.tag == "action" and self.action_extra is not None:
-            for k in list(el.attrib):
-                if k not in ("handler", "var"):
-                    del el.attrib[k]
-            for line in self.action_extra.toPlainText().splitlines():
-                line = line.strip()
-                if not line or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k = k.strip()
-                if k and k not in ("handler", "var"):
-                    el.set(k, v.strip())
+        for key in el.attrib.keys() - {"handler", "var"}:
+            del el.attrib[key]
+        for line in self.action_extra.toPlainText().splitlines():
+            key, sep, value = line.partition("=")
+            key = key.strip()
+            if sep and key and key not in ("handler", "var"):
+                el.set(key, value)
+        self.error_view.clear()
+        self._dirty = True
 
     # ============================================================ 校验 / 保存
     def _current_text(self) -> str:
         if self.tabs.currentIndex() == 1 and self.root is not None:
-            self._apply_form_to_element()
             return serialize(copy.deepcopy(self.root))
         return self.xml_edit.toPlainText()
 
@@ -900,8 +891,16 @@ class ScriptEditorDialog(QDialog):
             if path.suffix.lower() != ".xml":
                 path = path.with_suffix(".xml")
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.error_view.setPlainText(f"无法创建脚本目录：{exc}")
+            return
+        file = QSaveFile(str(path))
+        data = text.encode("utf-8")
+        if not file.open(QIODevice.OpenModeFlag.WriteOnly) or file.write(data) != len(data) or not file.commit():
+            self.error_view.setPlainText(f"无法保存脚本：{file.errorString()}")
+            return
         self.path = path
         self.saved_path = path
         self._dirty = False

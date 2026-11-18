@@ -13,7 +13,7 @@ auto_start = true
 sink = "file"
 result_dir = "../data/results"
 log_dir = "../data/logs"
-trace_retain_days = 30
+trace_retain_days = 30  # 预留，当前版本保留生成的 trace
 
 # M1 使用 mock；真机联调（M3）时改为 type="can" 并填写 interface/channel
 [resources.can_main]

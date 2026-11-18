@@ -9,13 +9,12 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import datetime
 from pathlib import Path
 
 from .config_loader import load_config
 from .engine import Engine, EngineListener
-from .logging_conf import TraceLogger, setup_run_logger
 from .engine.parser import ScriptParser
+from .logging_conf.logger import run_logging, trace_path_for
 from .storage.file_store import FileResultStore
 
 _RESULT_EXIT = {"PASS": 0, "FAIL": 1, "ERROR": 2, "ABORT": 3}
@@ -46,34 +45,20 @@ class CliListener(EngineListener):
     def on_run_start(self, ctx, script):
         self.logger.info(f"脚本 {script.name} v{script.version}，sha256={script.sha256[:12]}…")
 
-    def on_step_start(self, step, attempt):
-        pass
-
-    def on_log(self, level, message):
-        getattr(self.logger, level, self.logger.info)(message)
-
-    def on_trace(self, direction, resource, frame):
-        pass
-
     def on_step_finish(self, step, item):
         mark = {"PASS": "✓", "FAIL": "✗", "ERROR": "!"}[item.result]
         val = "" if item.value is None else f" = {item.value}{item.unit or ''}"
         extra = f" [{item.error_code}: {item.message}]" if item.error_code else ""
         self.logger.info(f"  {mark} {item.step_name}{val} -> {item.result}{extra}")
 
-    def on_run_finish(self, result):
-        pass
-
-
 def _cmd_run(args) -> int:
-    cfg_path = Path(args.config)
-    cfg = load_config(cfg_path)
-
-    log_dir = _resolve(cfg, cfg.storage.log_dir)
-    result_dir = _resolve(cfg, cfg.storage.result_dir)
-
-    logger, log_path = setup_run_logger(log_dir)
-    logger.info(f"simple_ATE {cfg.software_version} | station={cfg.station_id} | log={log_path}")
+    cfg = load_config(args.config)
+    sn = args.sn.strip()
+    if message := cfg.sn.validation_error(sn):
+        print(message, file=sys.stderr)
+        return 2
+    log_dir = cfg.resolve_path(cfg.storage.log_dir)
+    result_dir = cfg.resolve_path(cfg.storage.result_dir)
 
     script_path = Path(args.script)
     parser = ScriptParser(
@@ -83,29 +68,17 @@ def _cmd_run(args) -> int:
                            for name, spec in cfg.resources.items()})
     script = parser.parse_file(str(script_path))
 
-    store = FileResultStore(result_dir, mes_enabled=cfg.mes.enabled)
-    recovered = store.recover_aborted()
-    if recovered:
-        logger.warning(f"启动恢复：{recovered} 个未完成 Run 标记为 ABORT")
-
-    trace_dir = log_dir / "trace"
-    trace_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    trace_path = trace_dir / f"trace_{args.sn}_{stamp}.log"
-
-    listener = CliListener(logger)
-    engine = Engine(config=cfg, store=store, listener=listener,
-                    extensions_dir=cfg.base_dir / cfg.extensions_dir)
-    result = engine.run(script, sn=args.sn, trace_path=trace_path)
-
-    logger.info(f"最终结论: {result.result}")
-    return _RESULT_EXIT.get(result.result, 2)
-
-
-def _resolve(cfg, path: str) -> Path:
-    """配置中的相对路径以配置文件所在目录为基准。"""
-    p = Path(path)
-    return p if p.is_absolute() else cfg.base_dir / p
+    with run_logging(log_dir) as (logger, log_path):
+        logger.info(f"simple_ATE {cfg.software_version} | station={cfg.station_id} | log={log_path}")
+        store = FileResultStore(result_dir, mes_enabled=cfg.mes.enabled)
+        recovered = store.recover_aborted()
+        if recovered:
+            logger.warning(f"启动恢复：{recovered} 个未完成 Run 标记为 ABORT")
+        engine = Engine(config=cfg, store=store, listener=CliListener(logger),
+                        extensions_dir=cfg.resolve_path(cfg.extensions_dir))
+        result = engine.run(script, sn=sn, trace_path=trace_path_for(log_path, sn))
+        logger.info(f"最终结论: {result.result}")
+        return _RESULT_EXIT[result.result]
 
 
 def build_parser() -> argparse.ArgumentParser:

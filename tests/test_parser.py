@@ -58,6 +58,26 @@ class TestParserOK(unittest.TestCase):
 
 
 class TestParserErrors(unittest.TestCase):
+    def test_empty_station_and_invalid_attributes_report_locations(self):
+        parser = ScriptParser(station_resources=set(), allowed_extensions=set())
+        xml = b'''<test name="T" version="1.0">
+  <connect resource="missing" timeout="nan"/>
+  <step name="S"><action handler="sample_ext:read_status"/>
+    <send id="-1"><delay ms="1"/></send>
+    <limit value="1" min="inf"/>
+  </step>
+</test>'''
+        with self.assertRaises(ScriptParseErrors) as cm:
+            parser.parse_bytes(xml)
+        self.assertTrue({"E204", "E201", "E116", "E102", "E113", "E105"} <= codes(cm.exception))
+        e204 = next(error for error in cm.exception.errors if error.code == "E204")
+        self.assertEqual((e204.line, e204.column), (2, 2))
+
+    def test_step_requires_a_connected_resource(self):
+        with self.assertRaises(ScriptParseErrors) as cm:
+            parse('<test name="T" version="1.0"><step name="S"><send id="1"/></step></test>')
+        self.assertIn("E210", codes(cm.exception))
+
     def test_malformed(self):
         with self.assertRaises(ScriptParseErrors) as cm:
             parse("<test name=T version=1.0><step")
@@ -215,6 +235,15 @@ class TestParserErrors(unittest.TestCase):
 
 
 class TestProtocolExtensions(unittest.TestCase):
+    def test_serial_field_supports_offsets_beyond_can_and_signed_calibration(self):
+        script = parse('''<test name="T" version="1.0">
+          <connect resource="serial" protocol="serial" port="COM1"/>
+          <step name="S"><wait id="0">
+            <field var="temp" offset="12" length="2" gain="-0.1" bias="-40"/>
+          </wait></step></test>''')
+        field = script.statements[1].instructions[0].fields[0]
+        self.assertEqual((field.offset, field.gain, field.bias), (12, -0.1, -40))
+
     # ---------------- connect：串口/Modbus/USB/CAN 配置 ----------------
     def test_connect_options(self):
         s = parse(

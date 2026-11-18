@@ -19,6 +19,7 @@ class RunContext:
     resources: dict[str, Communication] = field(default_factory=dict)
     # 脚本所在目录：文件传输的相对路径以此为基准
     script_dir: Path = field(default_factory=lambda: Path("."))
+    variable_units: dict[str, str | None] = field(default_factory=dict)
 
     def resource(self, name: str) -> Communication:
         return self.resources[name]

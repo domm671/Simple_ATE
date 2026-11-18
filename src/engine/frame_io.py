@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import struct
+import tempfile
 import time
 import zlib
 from dataclasses import dataclass
@@ -21,9 +22,12 @@ from pathlib import Path
 from typing import Any
 
 from ..communication.base import Communication, Frame
+from ..communication.modbus import crc16_modbus
 from ..errors import (
+    CommunicationError,
     FieldExtractError,
     FileTransferError,
+    JudgeTypeError,
     SendDataError,
     TimeoutAteError,
 )
@@ -49,12 +53,7 @@ def compute_checksum(data: bytes, kind: str) -> bytes:
     if kind == "crc32":
         return struct.pack("<I", zlib.crc32(data) & 0xFFFFFFFF)
     if kind == "crc16_modbus":
-        crc = 0xFFFF
-        for byte in data:
-            crc ^= byte
-            for _ in range(8):
-                crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
-        return bytes([crc & 0xFF, (crc >> 8) & 0xFF])
+        return crc16_modbus(data)
     if kind == "sum8":
         return bytes([sum(data) & 0xFF])
     raise FileTransferError(f"未知校验算法: {kind}")
@@ -85,7 +84,7 @@ def do_send(spec: SendSpec, comm: Communication, variables: dict) -> Frame:
 def _round_engineering(value: float, gain: float, bias: float) -> float:
     """消除浮点尾数噪声（如 1203*0.01=12.030000000000001）。
 
-    按 gain/bias 的十进制有效位数做舍入，上限 9 位，避免过度截断。
+    按 gain/bias 的十进制小数位数做舍入，保留小于 1e-9 的标定量。
     """
     import decimal
 
@@ -93,7 +92,7 @@ def _round_engineering(value: float, gain: float, bias: float) -> float:
         d = decimal.Decimal(repr(x))
         return max(0, -d.as_tuple().exponent)
 
-    ndigits = min(9, max(decimals(gain), decimals(bias)))
+    ndigits = max(decimals(gain), decimals(bias))
     return round(value, ndigits)
 
 
@@ -113,7 +112,7 @@ def extract_field(frame: Frame, spec: FieldSpec) -> int | float:
 
 def do_wait(spec: WaitSpec, comm: Communication, variables: dict,
             default_timeout: float,
-            should_cancel=None) -> tuple[Frame, dict[str, int | float]]:
+            should_cancel=None, on_frame=None) -> tuple[Frame, dict[str, int | float]]:
     """等待匹配帧并提取字段。
 
     返回 (命中帧, 新字段字典)。超时抛 TimeoutAteError(E301)。
@@ -122,46 +121,44 @@ def do_wait(spec: WaitSpec, comm: Communication, variables: dict,
     should_cancel: 可选的零参回调，返回 True 时提前中止等待（抛 TimeoutAteError）。
     """
     timeout = spec.timeout if spec.timeout is not None else default_timeout
-    deadline_elapsed = 0.0
-    start = time.monotonic()
-    poll = 0.05
+    deadline = time.monotonic() + timeout
     while True:
         if should_cancel is not None and should_cancel():
             raise TimeoutAteError("等待被外部停止请求中断")
-        remaining = timeout - deadline_elapsed
+        remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutAteError(
                 f"等待应答 0x{spec.id:X}{'/' + hex(spec.id_mask) if spec.id_mask is not None else ''} 超时（{timeout}s）")
         try:
-            frame = comm.recv(min(poll, remaining))
+            frame = comm.recv(min(0.05, remaining))
         except TimeoutAteError:
-            deadline_elapsed = time.monotonic() - start
             continue
-        if frame.ext != spec.ext:
-            deadline_elapsed = time.monotonic() - start
-            continue
-        if spec.id_mask is None:
-            matched = frame.id == spec.id
-        else:
-            matched = (frame.id & spec.id_mask) == (spec.id & spec.id_mask)
-        if matched and len(frame.data) >= spec.min_len:
+        if on_frame is not None:
+            on_frame(frame)
+        if frame.ext == spec.ext and _id_matches(frame, spec) and len(frame.data) >= spec.min_len:
             extracted: dict[str, int | float] = {}
             for fld in spec.fields:
                 extracted[fld.var] = extract_field(frame, fld)
             variables.update(extracted)
             return frame, extracted
-        deadline_elapsed = time.monotonic() - start
 
 
-def drain(comm: Communication) -> None:
+def drain(comm: Communication, should_cancel=None, timeout: float = 5.0) -> None:
     """排空接收缓冲中的残留帧（应在发送请求帧之前调用）。"""
-    while True:
+    if should_cancel is not None and should_cancel():
+        raise TimeoutAteError("清空接收缓冲被外部停止请求中断")
+    discard = getattr(comm, "discard_input", None)
+    if discard is not None and discard():
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if should_cancel is not None and should_cancel():
+            raise TimeoutAteError("清空接收缓冲被外部停止请求中断")
         try:
             comm.recv(0.0)
         except TimeoutAteError:
             return
-        except Exception:                       # noqa: BLE001 - mock/不同实现差异
-            return
+    raise CommunicationError(f"[{comm.name}] 接收缓冲在 {timeout}s 内未排空")
 
 
 # ---------------------------------------------------------------- 文件传输
@@ -187,12 +184,16 @@ def _sleep_interruptible(seconds: float, should_cancel=None) -> None:
 def _atomic_write(path: Path, data: bytes) -> None:
     """原子写：临时文件 + fsync + os.replace，避免半写文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".part")
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    fd, name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _id_matches(frame: Frame, spec: WaitSpec) -> bool:
@@ -201,48 +202,49 @@ def _id_matches(frame: Frame, spec: WaitSpec) -> bool:
     return (frame.id & spec.id_mask) == (spec.id & spec.id_mask)
 
 
-def _normalize_checksum_value(value: Any) -> bytes | None:
+def _normalize_checksum_value(value: Any, kind: str) -> bytes:
     """把 checksum_value（十六进制字符串 / 整数）归一化为字节串。"""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise FileTransferError(f"非法 checksum_value: {value!r}")
-    if isinstance(value, int):
-        length = max(1, (value.bit_length() + 7) // 8)
-        return value.to_bytes(length, "big")
-    text = str(value).strip().replace("0x", "").replace("0X", "").replace(" ", "")
+    length = {"crc32": 4, "crc16_modbus": 2, "sum8": 1}[kind]
     try:
-        return bytes.fromhex(text)
-    except ValueError as exc:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value.to_bytes(length, "big")
+        if isinstance(value, str):
+            text = value.strip().replace("0x", "").replace("0X", "")
+            result = bytes.fromhex(text)
+            if len(result) == length:
+                return result
+    except (ValueError, OverflowError) as exc:
         raise FileTransferError(f"非法 checksum_value: {value!r}") from exc
+    raise FileTransferError(f"非法 checksum_value: {value!r}，需为 {length} 字节")
 
 
 def iter_send_file(spec: SendSpec, comm: Communication, base_dir: str | Path,
                    should_cancel=None):
     """把本地文件分块逐个发出：每发一帧 yield 一帧，供上层记 trace/日志。"""
     path = _resolve_transfer_path(spec.file, base_dir)
-    if not path.exists():
-        raise FileTransferError(f"待发送文件不存在: {path}")
     chunk_size = max(1, spec.chunk_size)
     header = bytes(spec.header)
     seq = 0
-    with open(path, "rb") as f:
-        while True:
-            if should_cancel is not None and should_cancel():
-                return
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            data = bytearray(header)
-            if spec.seq_len:
-                data += seq.to_bytes(spec.seq_len, "little")
-            data += chunk
-            frame = Frame(id=spec.id, data=bytes(data), ext=spec.ext)
-            comm.send(frame)
-            yield frame
-            seq += 1
-            if spec.interval > 0:
-                _sleep_interruptible(spec.interval, should_cancel)
+    try:
+        with open(path, "rb") as f:
+            max_chunks = 1 << (8 * spec.seq_len) if spec.seq_len else None
+            if max_chunks is not None and os.fstat(f.fileno()).st_size > max_chunks * chunk_size:
+                raise FileTransferError(f"{path} 的分块数量超过序号容量 {max_chunks}")
+            while should_cancel is None or not should_cancel():
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                if max_chunks is not None and seq >= max_chunks:
+                    raise FileTransferError(f"{path} 的分块数量超过序号容量 {max_chunks}")
+                sequence = seq.to_bytes(spec.seq_len, "little") if spec.seq_len else b""
+                frame = Frame(id=spec.id, data=header + sequence + chunk, ext=spec.ext)
+                comm.send(frame)
+                yield frame
+                seq += 1
+                if spec.interval > 0:
+                    _sleep_interruptible(spec.interval, should_cancel)
+    except OSError as exc:
+        raise FileTransferError(f"读取待发送文件 {path} 失败: {exc}") from exc
 
 
 def do_wait_file(spec: WaitSpec, comm: Communication, variables: dict,
@@ -251,14 +253,17 @@ def do_wait_file(spec: WaitSpec, comm: Communication, variables: dict,
     """接收多帧并拼装为文件。
 
     终止条件：收到 `size` 字节 / `chunks` 帧 / 静默 `idle_gap` 秒。
-    任何条件到达或整体超时（且已有数据）后结束；无任何数据则抛 E301。
+    整体超时前必须达到终止条件，否则抛 E301 并保留原文件。
     """
     timeout = spec.timeout if spec.timeout is not None else default_timeout
     header = bytes(spec.header)
     expected: bytes | None = None
-    if spec.checksum != "none":
-        expected = _normalize_checksum_value(
-            resolve_value(spec.checksum_value, variables))
+    if spec.checksum != "none" and spec.checksum_value is not None:
+        try:
+            expected = _normalize_checksum_value(
+                resolve_value(spec.checksum_value, variables), spec.checksum)
+        except JudgeTypeError as exc:
+            raise FileTransferError(exc.message) from exc
 
     ordered: dict[int, bytes] = {}
     appended: list[bytes] = []
@@ -277,18 +282,18 @@ def do_wait_file(spec: WaitSpec, comm: Communication, variables: dict,
         now = time.monotonic()
         if spec.idle_gap is not None and chunks > 0 and now - last >= spec.idle_gap:
             break
-        elapsed = now - start
-        if elapsed >= timeout:
-            if chunks == 0:
-                raise TimeoutAteError(f"接收文件超时（{timeout}s），未收到任何数据帧")
-            break
+        remaining = start + timeout - now
+        if remaining <= 0:
+            raise TimeoutAteError(f"接收文件超时（{timeout}s），已收 {total} 字节 / {chunks} 帧")
+        if spec.idle_gap is not None and chunks:
+            remaining = min(remaining, last + spec.idle_gap - now)
         try:
-            frame = comm.recv(min(0.05, max(0.0, timeout - elapsed)))
+            frame = comm.recv(min(0.05, remaining))
         except TimeoutAteError:
             continue
         if on_frame is not None:
             on_frame(frame)
-        if frame.ext != spec.ext or not _id_matches(frame, spec):
+        if frame.ext != spec.ext or not _id_matches(frame, spec) or len(frame.data) < spec.min_len:
             continue
 
         data = frame.data
@@ -305,12 +310,12 @@ def do_wait_file(spec: WaitSpec, comm: Communication, variables: dict,
         if spec.chunk_size is not None:
             data = data[:spec.chunk_size]
         if not data:
-            if spec.size is not None and total >= spec.size:
-                break
             continue
-        if spec.seq_len:
+        if seq is not None:
             if seq in ordered:
-                continue                        # 重复帧丢弃
+                if ordered[seq] != data:
+                    raise FileTransferError(f"接收文件的序号 {seq} 出现不同数据")
+                continue
             ordered[seq] = data
         else:
             appended.append(data)
@@ -322,7 +327,9 @@ def do_wait_file(spec: WaitSpec, comm: Communication, variables: dict,
                 f"接收数据超过 max_size({spec.max_size})，已中止（可能存在协议错位）")
 
     if spec.seq_len:
-        buf = b"".join(ordered[k] for k in sorted(ordered))
+        if ordered and max(ordered) != chunks - 1:
+            raise FileTransferError("接收文件的分块序号不连续或未从 0 开始")
+        buf = b"".join(ordered[k] for k in range(chunks))
     else:
         buf = b"".join(appended)
     if spec.size is not None and len(buf) > spec.size:
@@ -330,14 +337,19 @@ def do_wait_file(spec: WaitSpec, comm: Communication, variables: dict,
     if spec.size is not None and len(buf) != spec.size:
         raise FileTransferError(
             f"接收文件长度 {len(buf)} 字节与期望 size={spec.size} 不符")
-    if spec.checksum != "none":
+    if expected is not None:
         actual = compute_checksum(buf, spec.checksum)
-        if expected is not None and actual != expected:
+        if actual != expected:
             raise FileTransferError(
                 f"文件校验失败（{spec.checksum}）：期望 {expected.hex().upper()}，"
                 f"实际 {actual.hex().upper()}")
 
     path = _resolve_transfer_path(spec.file, base_dir)
-    _atomic_write(path, buf)
+    if should_cancel is not None and should_cancel():
+        raise TimeoutAteError("文件接收被外部停止请求中断")
+    try:
+        _atomic_write(path, buf)
+    except OSError as exc:
+        raise FileTransferError(f"写入接收文件 {path} 失败: {exc}") from exc
     return FileTransferStats(bytes_received=len(buf), chunks=chunks, path=str(path),
                              checksum_kind=spec.checksum)

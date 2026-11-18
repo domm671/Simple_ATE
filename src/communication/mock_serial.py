@@ -28,24 +28,11 @@
 
 from __future__ import annotations
 
-import json
 import queue
 import time
 from pathlib import Path
-from typing import Any
 
-from ..errors import CommunicationError
-
-
-def parse_data(value: Any) -> bytes:
-    """把 Mock 规则里的数据字段解析为字节：列表、整数或空格分隔十六进制串。"""
-    if value is None:
-        return b""
-    if isinstance(value, (bytes, bytearray)):
-        return bytes(value)
-    if isinstance(value, (list, tuple)):
-        return bytes(int(b) for b in value)
-    return bytes(int(tok, 16) for tok in str(value).split())
+from .mock import _ScheduledResponses, load_rules, parse_data
 
 
 class MockSerialPort:
@@ -54,9 +41,8 @@ class MockSerialPort:
     def __init__(self, rules: list[dict] | None = None,
                  default_timeout: float = 0.0):
         self._rules = list(rules or [])
-        self.default_timeout = float(default_timeout)
         self.timeout = float(default_timeout)
-        self._rx: queue.Queue[bytes] = queue.Queue()
+        self._rx = _ScheduledResponses[bytes]()
         self._buf = bytearray()
         self.is_open = False
         self.written: list[bytes] = []          # 记录写出的字节，供断言
@@ -64,13 +50,8 @@ class MockSerialPort:
     # ------------------------------------------------------------ 构造
     @classmethod
     def from_file(cls, path: str | Path) -> "MockSerialPort":
-        p = Path(path)
-        if not p.exists():
-            raise CommunicationError(f"串口 Mock 应答脚本不存在: {p}")
-        with open(p, "r", encoding="utf-8") as f:
-            doc = json.load(f)
-        return cls(rules=list(doc.get("rules", [])),
-                   default_timeout=float(doc.get("default_timeout", 0.0)))
+        rules, timeout = load_rules(path, 0.0)
+        return cls(rules=rules, default_timeout=timeout)
 
     # ------------------------------------------------------------ 生命周期
     def open(self) -> None:
@@ -79,13 +60,13 @@ class MockSerialPort:
     def close(self) -> None:
         self.is_open = False
         self._buf.clear()
-        self._rx = queue.Queue()
+        self._rx = _ScheduledResponses[bytes]()
 
     def reset_input_buffer(self) -> None:
         self._buf.clear()
         while True:
             try:
-                self._rx.get_nowait()
+                self._rx.get(0.0)
             except queue.Empty:
                 break
 
@@ -104,17 +85,18 @@ class MockSerialPort:
         rule = self._match(data)
         if rule is None:
             return len(data)                     # 无规则 -> 设备不应答 -> 上层超时
-        delay = float(rule.get("delay", 0.0))
-        if delay > 0:
-            time.sleep(delay)
         resp = self._build_response(rule)
         if resp:
-            self._rx.put(resp)
+            self._rx.put(resp, float(rule.get("delay", 0.0)))
         return len(data)
 
     @property
     def in_waiting(self) -> int:
-        return len(self._buf)
+        while True:
+            try:
+                self._buf += self._rx.get(0.0)
+            except queue.Empty:
+                return len(self._buf)
 
     def read(self, size: int = 1) -> bytes:
         """近似 pyserial.read(size)：最多等 self.timeout 秒，返回已到达的字节。"""
@@ -128,15 +110,8 @@ class MockSerialPort:
                 out += self._buf[:take]
                 del self._buf[:take]
                 continue
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                try:
-                    self._buf += self._rx.get_nowait()
-                except queue.Empty:
-                    break
-                continue
             try:
-                self._buf += self._rx.get(timeout=remaining)
+                self._buf += self._rx.get(deadline - time.monotonic())
             except queue.Empty:
                 break
         return bytes(out)

@@ -7,7 +7,7 @@ from pathlib import Path
 from simple_ate.communication.mock import MockCommunication
 from simple_ate.config_loader import StationConfig, ResourceConfig
 from simple_ate.engine import Engine, EngineListener
-from simple_ate.errors import ExtensionError
+from simple_ate.errors import ExtensionError, ScriptParseErrors
 from simple_ate.engine.extension import ExtensionLoader
 from simple_ate.engine.parser import ScriptParser
 from simple_ate.storage.file_store import FileResultStore
@@ -74,6 +74,12 @@ class TestExtension(unittest.TestCase):
         r = self._engine(XML)
         self.assertEqual(r.result, "PASS")
         self.assertEqual(r.items[0].value, 42)
+
+    def test_missing_handler_rejected_before_run_creation(self):
+        with self.assertRaises(ScriptParseErrors) as error:
+            self._engine(XML.replace("myext:echo", "myext:missing"))
+        self.assertEqual(error.exception.errors[0].code, "E202")
+        self.assertEqual(list((self.tmp / "results").rglob("*.json")), [])
 
     def test_extension_runtime_error(self):
         xml = """<test name="T" version="1.0"><connect resource="can"/>

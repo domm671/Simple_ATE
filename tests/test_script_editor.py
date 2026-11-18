@@ -85,6 +85,21 @@ class TestXmlTab(unittest.TestCase):
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "未安装 PySide6，跳过脚本编辑器测试")
 class TestGraphTab(unittest.TestCase):
+    def test_editing_frame_data_preserves_boolean_alias(self):
+        dlg = new_dlg()
+        dlg.xml_edit.setPlainText('''<test name="T" version="1.0">
+          <connect resource="can_main"/><step name="S">
+          <send id="0x1234" ext="1" data="01"/></step></test>''')
+        dlg.tabs.setCurrentIndex(1)
+        send_item = dlg.tree.topLevelItem(0).child(1).child(0)
+        dlg.tree.setCurrentItem(send_item)
+        dlg._form_widgets["data"].setText("02")
+        el = send_item.data(0, Qt.UserRole)
+        self.assertEqual(el.get("ext"), "1")
+        self.assertEqual(el.get("data"), "02")
+        self.assertEqual(dlg.validate_text(dlg._current_text()), "")
+        dlg.deleteLater()
+
     def test_load_tree_structure(self):
         dlg = make_dlg()
         dlg.tabs.setCurrentIndex(1)
@@ -233,7 +248,6 @@ class TestActionExtraParams(unittest.TestCase):
         dlg.tree.setCurrentItem(action_item)
         self.assertIn("addr=0x10", dlg.action_extra.toPlainText())
         dlg.action_extra.setPlainText("addr=0x20\nmode=fast")
-        dlg._apply_form_to_element()
         el = action_item.data(0, Qt.UserRole)
         self.assertEqual(el.get("addr"), "0x20")
         self.assertEqual(el.get("mode"), "fast")
@@ -443,7 +457,6 @@ class TestConnectDynamicFields(unittest.TestCase):
         self.assertFalse(dlg._form_widgets["host"].isHidden())
         self.assertFalse(dlg._form_widgets["tcp_port"].isHidden())
         dlg._form_widgets["host"].setText("192.168.1.20")
-        dlg._apply_form_to_element()
         el = item.data(0, Qt.UserRole)
         self.assertNotIn("port", el.attrib)
         self.assertEqual(el.get("host"), "192.168.1.20")

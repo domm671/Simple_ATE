@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from ..errors import ExtensionError
+from .judge import resolve
 from .model import VarRef
 
 
@@ -15,7 +16,7 @@ def resolve_kwargs(raw: dict, variables: dict) -> dict:
     out: dict[str, str] = {}
     for key, val in raw.items():
         if isinstance(val, VarRef):
-            out[key] = str(variables[val.name])
+            out[key] = str(resolve(val, variables))
         else:
             out[key] = str(val)
     return out
@@ -50,6 +51,10 @@ class ExtensionLoader:
             raise ExtensionError(f"无法加载扩展模块: {path}")
         module = importlib.util.module_from_spec(spec)
         sys.modules[unique] = module
-        spec.loader.exec_module(module)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:  # noqa: BLE001
+            sys.modules.pop(unique, None)
+            raise ExtensionError(f"无法加载扩展模块 {module_name}: {exc}") from exc
         self._cache[module_name] = module
         return module

@@ -22,7 +22,7 @@ from simple_ate.engine.frame_io import (
     iter_send_file,
 )
 from simple_ate.engine.model import Send as SendSpec
-from simple_ate.engine.model import Wait as WaitSpec
+from simple_ate.engine.model import VarRef, Wait as WaitSpec
 
 
 class FakeComm:
@@ -99,7 +99,9 @@ class TestModbusFraming(unittest.TestCase):
 
 class TestFileTransfer(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.tmp = Path(temp.name)
 
     def test_send_and_receive(self):
         payload = bytes(range(10))
@@ -190,6 +192,37 @@ class TestFileTransfer(unittest.TestCase):
         send = SendSpec(id=0x10, mode="file", file="nope.bin")
         with self.assertRaises(FileTransferError):
             list(iter_send_file(send, comm, self.tmp))
+
+    def test_timeout_does_not_replace_destination_with_partial_file(self):
+        destination = self.tmp / "out.bin"
+        destination.write_bytes(b"original")
+        wait = WaitSpec(id=1, mode="file", file="out.bin", chunks=2, min_len=2)
+        frames = [Frame(id=1, data=b"\x01\x02"), Frame(id=1, data=b"\x03")]
+        with self.assertRaises(TimeoutAteError):
+            do_wait_file(wait, FakeComm(frames), {}, self.tmp, 0.01)
+        self.assertEqual(destination.read_bytes(), b"original")
+
+    def test_gap_in_sequence_rejects_file_even_at_expected_length(self):
+        frames = [Frame(id=1, data=b"\x00A"), Frame(id=1, data=b"\x02C")]
+        wait = WaitSpec(id=1, mode="file", file="out.bin", size=2, seq_len=1)
+        with self.assertRaises(FileTransferError):
+            do_wait_file(wait, FakeComm(frames), {}, self.tmp, 0.1)
+        self.assertFalse((self.tmp / "out.bin").exists())
+
+    def test_missing_checksum_variable_cannot_disable_validation(self):
+        frames = [Frame(id=1, data=b"A")]
+        wait = WaitSpec(id=1, mode="file", file="out.bin", size=1,
+                        checksum="sum8", checksum_value=VarRef("expected"))
+        with self.assertRaises(FileTransferError):
+            do_wait_file(wait, FakeComm(frames), {}, self.tmp, 0.1)
+
+    def test_send_sequence_overflow_is_detected_before_sending(self):
+        (self.tmp / "payload.bin").write_bytes(bytes(257))
+        spec = SendSpec(id=1, mode="file", file="payload.bin", chunk_size=1, seq_len=1)
+        comm = FakeComm()
+        with self.assertRaises(FileTransferError):
+            list(iter_send_file(spec, comm, self.tmp))
+        self.assertEqual(comm.sent, [])
 
 
 if __name__ == "__main__":

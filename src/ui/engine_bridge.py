@@ -36,6 +36,8 @@ class EngineBridge(QObject, EngineListener):
         super().__init__()
         self._judge_event: threading.Event | None = None
         self._judge_decision: bool | None = None
+        self._judge_lock = threading.Lock()
+        self._judge_cancelled = False
 
     # ------------------------------------------------------------ 回调（工作线程）
     def on_run_start(self, ctx, script: Script) -> None:
@@ -47,17 +49,29 @@ class EngineBridge(QObject, EngineListener):
         Qt 自动以 queued connection 把信号投递到主线程；主线程弹窗后调用
         resolve_manual_judge() 置位本事件，工作线程随即返回。
         """
-        self._judge_decision = None
-        self._judge_event = threading.Event()
+        with self._judge_lock:
+            if self._judge_cancelled:
+                return None
+            self._judge_decision = None
+            event = self._judge_event = threading.Event()
         self.manualJudgeRequested.emit(request)
-        self._judge_event.wait()
-        return self._judge_decision
+        event.wait()
+        with self._judge_lock:
+            self._judge_event = None
+            return None if self._judge_cancelled else self._judge_decision
 
     def resolve_manual_judge(self, decision: bool | None) -> None:
         """主线程在弹窗结束后回填结果。"""
-        self._judge_decision = decision
-        if self._judge_event is not None:
-            self._judge_event.set()
+        with self._judge_lock:
+            self._judge_decision = decision
+            if self._judge_event is not None:
+                self._judge_event.set()
+
+    def cancel_manual_judge(self) -> None:
+        with self._judge_lock:
+            self._judge_cancelled = True
+            if self._judge_event is not None:
+                self._judge_event.set()
 
     def on_run_finish(self, result: RunResult) -> None:
         self.runFinished.emit(result)

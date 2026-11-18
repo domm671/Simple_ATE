@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
@@ -38,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config_loader import StationConfig
-from ..engine.model import ItemResult
+from ..engine.model import ItemResult, ManualJudgeRequest
 from ..storage.base import RunResult
 from .engine_bridge import EngineBridge
 from .worker import RunWorker
@@ -68,6 +67,8 @@ class MainWindow(QMainWindow):
         self.state = IDLE
         self.worker: RunWorker | None = None
         self.bridge: EngineBridge | None = None
+        self._closing = False
+        self._manual_dialog: QMessageBox | None = None
 
         self.setWindowTitle(f"simple_ATE 终测工位 — {config.station_id}")
         self.resize(980, 760)
@@ -134,12 +135,12 @@ class MainWindow(QMainWindow):
         self.script_combo = QComboBox()
         self.script_combo.setMinimumWidth(420)
         lay.addWidget(self.script_combo, stretch=1)
-        btn_refresh = QPushButton("刷新")
-        btn_refresh.clicked.connect(self._refresh_scripts)
-        lay.addWidget(btn_refresh)
-        btn_browse = QPushButton("打开其它…")
-        btn_browse.clicked.connect(self._browse_script)
-        lay.addWidget(btn_browse)
+        self.btn_refresh = QPushButton("刷新")
+        self.btn_refresh.clicked.connect(self._refresh_scripts)
+        lay.addWidget(self.btn_refresh)
+        self.btn_browse = QPushButton("打开其它…")
+        self.btn_browse.clicked.connect(self._browse_script)
+        lay.addWidget(self.btn_browse)
         self.btn_edit_script = QPushButton("编辑脚本…")
         self.btn_edit_script.clicked.connect(self._edit_current_script)
         lay.addWidget(self.btn_edit_script)
@@ -188,10 +189,16 @@ class MainWindow(QMainWindow):
 
     # ============================================================ 脚本选择
     def _refresh_scripts(self) -> None:
+        selected = self._current_script()
         self.script_combo.clear()
         if self.scripts_dir.exists():
             for p in sorted(self.scripts_dir.glob("*.xml")):
                 self.script_combo.addItem(p.name, str(p))
+        if selected is not None:
+            if Path(selected).is_file():
+                self._select_script_in_combo(selected)
+            else:
+                self.script_combo.setCurrentIndex(-1)
 
     def _browse_script(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -207,7 +214,12 @@ class MainWindow(QMainWindow):
     def _open_editor(self, path: Path | None) -> None:
         from .script_editor import ScriptEditorDialog
 
-        dlg = ScriptEditorDialog(self.config, path=path, parent=self)
+        try:
+            dlg = ScriptEditorDialog(self.config, path=path, parent=self)
+        except (OSError, UnicodeError) as exc:
+            self._notify(f"无法读取脚本：{exc}")
+            return
+        dlg.finished.connect(dlg.deleteLater)
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.saved_path is not None:
             saved = dlg.saved_path
             self._refresh_scripts()
@@ -241,28 +253,13 @@ class MainWindow(QMainWindow):
         running = state == RUNNING
         self.btn_start.setEnabled(not running)
         self.btn_stop.setEnabled(running)
+        self.btn_reset.setEnabled(not running)
         self.sn_edit.setEnabled(not running)
         self.script_combo.setEnabled(not running)
         self.btn_edit_script.setEnabled(not running)
         self.btn_new_script.setEnabled(not running)
-
-    def _sn_valid(self, sn: str) -> bool:
-        # SN 默认不做 pattern 校验（sn.validation_enabled=false），仅要求非空；
-        # 校验逻辑保留，使用方在配置中启用 sn.validation_enabled 并设置 pattern 后生效。
-        if not sn:
-            return False
-        if not self.config.sn.validation_enabled:
-            return True
-        pattern = self.config.sn.pattern
-        try:
-            return re.fullmatch(pattern, sn) is not None
-        except re.error:
-            return True
-
-    def _sn_invalid_hint(self, sn: str) -> str:
-        if not sn:
-            return "SN 不能为空"
-        return f"SN 不符合规则：{self.config.sn.pattern}"
+        self.btn_refresh.setEnabled(not running)
+        self.btn_browse.setEnabled(not running)
 
     def _on_sn_enter(self) -> None:
         """扫码枪回车：auto_start=true 时直接启动，否则仅校验并聚焦开始按钮。"""
@@ -272,11 +269,10 @@ class MainWindow(QMainWindow):
             self._on_start()
         else:
             sn = self.sn_edit.text().strip()
-            if self._sn_valid(sn):
-                self.sn_hint.setText("")
+            message = self.config.sn.validation_error(sn)
+            self.sn_hint.setText(message)
+            if not message:
                 self.btn_start.setFocus()
-            else:
-                self.sn_hint.setText(self._sn_invalid_hint(sn))
 
     def _on_start(self) -> None:
         if self.state == RUNNING:
@@ -286,8 +282,8 @@ class MainWindow(QMainWindow):
             self._notify("请先选择测试脚本。")
             return
         sn = self.sn_edit.text().strip()
-        if not self._sn_valid(sn):
-            self.sn_hint.setText(self._sn_invalid_hint(sn))
+        if message := self.config.sn.validation_error(sn):
+            self.sn_hint.setText(message)
             self.sn_edit.setFocus()
             return
         self.sn_hint.setText("")
@@ -308,6 +304,8 @@ class MainWindow(QMainWindow):
         if self.worker:
             self.worker.request_stop()
             self.btn_stop.setEnabled(False)
+            if self._manual_dialog is not None:
+                self._manual_dialog.reject()
             self._append_log("warning", "已请求停止，等待当前操作安全结束…")
 
     def _on_reset(self) -> None:
@@ -335,7 +333,6 @@ class MainWindow(QMainWindow):
         self.bridge.stepStarted.connect(self._on_step_started)
         self.bridge.stepFinished.connect(self._on_step_finished)
         self.bridge.logMessage.connect(self._append_log)
-        self.bridge.traceFrame.connect(self._on_trace)
         self.bridge.manualJudgeRequested.connect(self._on_manual_judge_requested)
 
     def _on_run_started(self, sn: str, name: str, version: str) -> None:
@@ -373,21 +370,24 @@ class MainWindow(QMainWindow):
         res_item.setText(text)
         res_item.setForeground(RESULT_COLORS.get(item.result, QColor("black")))
 
-    def _on_trace(self, direction: str, resource: str, summary: str) -> None:
-        # trace 不进 UI 主日志区（规范：trace 只写文件）；这里仅留调试钩子，默认不显示
-        pass
-
     # ============================================================ 人工判定
-    def _on_manual_judge_requested(self, request) -> None:
+    def _on_manual_judge_requested(self, request: ManualJudgeRequest) -> None:
         """主线程槽：弹出人工判定对话框，并把结果回填给阻塞中的工作线程。"""
+        bridge = self.bridge
+        if bridge is None or not self.btn_stop.isEnabled():
+            return
         self.status_label.setText(f"等待人工判定：{request.step_name}")
         self.detail_label.setText(request.prompt or request.step_name)
-        decision = self._ask_manual_judge(request)
-        self.detail_label.setText("")
-        if self.bridge is not None:
-            self.bridge.resolve_manual_judge(decision)
+        decision = None
+        try:
+            decision = self._ask_manual_judge(request)
+        finally:
+            self.detail_label.setText("")
+            bridge.resolve_manual_judge(decision)
+        if self.state == RUNNING:
+            self.status_label.setText(f"运行中：SN {self.sn_edit.text().strip()}")
 
-    def _ask_manual_judge(self, request) -> bool | None:
+    def _ask_manual_judge(self, request: ManualJudgeRequest) -> bool | None:
         """人工判定弹窗：合格=True / 不合格=False / 关闭或中止=None。
 
         独立成方法便于自动化测试替换（不真正弹模态框）。
@@ -404,8 +404,13 @@ class MainWindow(QMainWindow):
         btn_no = box.addButton("不合格 (No)", QMessageBox.NoRole)
         box.addButton("中止 (Cancel)", QMessageBox.RejectRole)
         box.setDefaultButton(btn_yes)
-        box.exec()
-        clicked = box.clickedButton()
+        self._manual_dialog = box
+        try:
+            box.exec()
+            clicked = box.clickedButton()
+        finally:
+            self._manual_dialog = None
+            box.deleteLater()
         if clicked is btn_yes:
             return True
         if clicked is btn_no:
@@ -424,24 +429,33 @@ class MainWindow(QMainWindow):
                 for i in fails[:6])
             extra = " …" if len(fails) > 6 else ""
             self.detail_label.setText(f"异常/不合格项：{names}{extra}")
-        else:
+        elif result.result == "PASS":
             self.detail_label.setText(f"全部 {len(result.items)} 项通过")
+        elif result.result == "ERROR":
+            self.detail_label.setText("运行遇到异常，详见日志")
+        else:
+            self.detail_label.setText("测试已中止")
         self.status_label.setText(
             f"工位 {self.config.station_id} ｜ 结论 {result.result} ｜ SN {result.meta.sn}")
-        self._set_state(IDLE)
-        self._refresh_pending_count()
-        # 为下一次扫码做准备
-        self.sn_edit.clear()
-        self.sn_edit.setFocus()
+        self._finish_ui()
 
     def _on_run_failed(self, message: str) -> None:
         self.result_label.setText("启动失败")
         self.result_label.setStyleSheet("color: #D02424;")
         self.detail_label.setText("脚本或配置错误，详见日志")
         self._append_log("error", message)
-        self._set_state(IDLE)
         self._notify(message)
+        self._finish_ui()
+
+    def _finish_ui(self) -> None:
+        self.worker = None
+        self.bridge = None
+        self._set_state(IDLE)
+        self._refresh_pending_count()
+        self.sn_edit.clear()
         self.sn_edit.setFocus()
+        if self._closing:
+            QTimer.singleShot(0, self.close)
 
     def _refresh_pending_count(self) -> None:
         """统计 pending 目录待上传 MES 的结果数。MES 禁用时不显示。"""
@@ -484,14 +498,17 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self.state == RUNNING and self.worker:
+            event.ignore()
+            if self._closing:
+                return
             reply = QMessageBox.question(
                 self, "确认退出", "测试正在进行，确定停止并退出吗？",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply != QMessageBox.Yes:
-                event.ignore()
                 return
-            self.worker.request_stop()
-            self.worker.wait(3000)
+            self._closing = True
+            self._on_stop()
+            return
         event.accept()
 
 

@@ -5,8 +5,10 @@
 
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -19,6 +21,7 @@ else:
     PYSIDE6_AVAILABLE = True
 
 from simple_ate.config_loader import load_config  # noqa: E402
+from simple_ate.engine.parser import ScriptParser  # noqa: E402
 
 if PYSIDE6_AVAILABLE:
     from simple_ate.ui.main_window import IDLE, RUNNING, MainWindow  # noqa: E402
@@ -62,10 +65,10 @@ class TestMainWindow(unittest.TestCase):
     def test_sn_not_validated_by_default(self):
         # 默认 sn.validation_enabled=False：不做 pattern 校验，任意非空 SN 均有效
         self.assertFalse(self.cfg.sn.validation_enabled)
-        self.assertTrue(self.win._sn_valid("bad-sn!!"))
-        self.assertTrue(self.win._sn_valid("BMS20260909001"))
+        self.assertFalse(self.cfg.sn.validation_error("bad-sn!!"))
+        self.assertFalse(self.cfg.sn.validation_error("BMS20260909001"))
         # 仅空 SN 仍然不允许
-        self.assertFalse(self.win._sn_valid(""))
+        self.assertTrue(self.cfg.sn.validation_error(""))
 
     def test_sn_validation_blocks_start(self):
         # 使用方按需启用 pattern 校验
@@ -81,8 +84,16 @@ class TestMainWindow(unittest.TestCase):
         # 启用校验后按 pattern = ^BMS[0-9]{11}$ 判定
         self.cfg.sn.validation_enabled = True
         self.cfg.sn.pattern = r"^BMS[0-9]{11}$"
-        self.assertTrue(self.win._sn_valid("BMS20260909001"))
-        self.assertFalse(self.win._sn_valid("X"))
+        self.assertFalse(self.cfg.sn.validation_error("BMS20260909001"))
+        self.assertTrue(self.cfg.sn.validation_error("X"))
+
+    def test_invalid_station_regex_blocks_start(self):
+        self.cfg.sn.validation_enabled = True
+        self.cfg.sn.pattern = "["
+        self.win.sn_edit.setText("BMS20260909001")
+        self.win._on_start()
+        self.assertEqual(self.win.state, IDLE)
+        self.assertIn("规则无效", self.win.sn_hint.text())
 
     def test_start_without_script(self):
         self.win.script_combo.clear()
@@ -115,6 +126,8 @@ class TestMainWindow(unittest.TestCase):
         # 结果文件已保存
         files = list((self.result_dir / "uploaded").glob("BMS20260909001_*.json"))
         self.assertEqual(len(files), 1)
+        self.assertEqual(len(list(self.log_dir.glob("run_*.log"))), 1)
+        self.assertEqual(len(list((self.log_dir / "trace").glob("trace_*.log"))), 1)
         # 结束后 SN 框清空并聚焦，便于下一次扫码
         self.assertEqual(self.win.sn_edit.text(), "")
 
@@ -139,6 +152,26 @@ class TestMainWindow(unittest.TestCase):
         self.assertEqual(self.win.state, IDLE)
         self.assertIn("ABORT", self.win.result_label.text())
 
+    def test_stop_before_worker_starts_is_preserved(self):
+        self.win._select_script_in_combo(str(ROOT / "scripts" / "bms_ft.xml"))
+        self.win.sn_edit.setText("EARLY_STOP")
+        release_parse = threading.Event()
+        parse_file = ScriptParser.parse_file
+
+        def parse_after_stop(parser, path):
+            release_parse.wait(timeout=2)
+            return parse_file(parser, path)
+
+        with patch.object(ScriptParser, "parse_file", autospec=True, side_effect=parse_after_stop):
+            self.win._on_start()
+            try:
+                self.win._on_stop()
+            finally:
+                release_parse.set()
+            self._wait_idle(5.0)
+        self.assertIn("ABORT", self.win.result_label.text())
+        self.assertEqual(self.win.table.rowCount(), 0)
+
     # ------------------------------------------------------------ 解析错误
     def test_bad_script_shows_start_failure(self):
         script = self.tmp / "bad.xml"
@@ -151,6 +184,7 @@ class TestMainWindow(unittest.TestCase):
         self._wait_idle(5.0)
         self.assertEqual(self.win.state, IDLE)
         self.assertIn("启动失败", self.win.result_label.text())
+        self.assertEqual(self.win.sn_edit.text(), "")
 
     def test_auto_start_disabled_does_not_run(self):
         self.cfg.sn.auto_start = False
@@ -207,6 +241,25 @@ class TestMainWindow(unittest.TestCase):
         self.win._on_start()
         self._wait_idle(10.0)
         self.assertIn("FAIL", self.win.result_label.text())
+
+    def test_stop_while_waiting_for_manual_judgment(self):
+        script = self.tmp / "manual_stop.xml"
+        script.write_text(
+            '<test name="STOP_MANUAL" version="1.0"><connect resource="can_main"/>'
+            '<step name="Led"><send id="1"/>'
+            '<limit mode="manual" prompt="确认 LED"/></step></test>', encoding="utf-8")
+        self.win._select_script_in_combo(str(script))
+        self.win.sn_edit.setText("STOP_MANUAL")
+
+        def stop_in_dialog(request):
+            self.win._on_stop()
+            return True
+
+        with patch.object(self.win, "_ask_manual_judge", side_effect=stop_in_dialog) as ask:
+            self.win._on_start()
+            self._wait_idle(5.0)
+            ask.assert_called_once()
+        self.assertIn("ABORT", self.win.result_label.text())
 
     def _wait_idle(self, seconds: float):
         import time

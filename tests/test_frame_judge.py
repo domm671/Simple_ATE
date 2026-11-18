@@ -3,7 +3,7 @@
 import unittest
 
 from simple_ate.communication.base import Frame
-from simple_ate.errors import FieldExtractError, SendDataError
+from simple_ate.errors import FieldExtractError, JudgeTypeError, SendDataError
 from simple_ate.engine.frame_io import build_data, extract_field
 from simple_ate.engine.judge import judge
 from simple_ate.engine.model import Field as F
@@ -46,6 +46,10 @@ class TestExtract(unittest.TestCase):
         f = F(var="v", offset=0, length=1, gain=1.0, bias=-40.0)
         self.assertEqual(extract_field(frame(bytes([100])), f), 60.0)
 
+    def test_gain_below_one_nanounit_retains_calibrated_value(self):
+        f = F(var="v", offset=0, gain=1e-10)
+        self.assertEqual(extract_field(frame(b"\x03"), f), 3e-10)
+
     def test_raw(self):
         f = F(var="v", offset=1, length=1, raw=True)
         self.assertIsInstance(extract_field(frame(self.data), f), int)
@@ -82,9 +86,14 @@ class TestJudge(unittest.TestCase):
             judge(lim, {"s": "OK"})
 
     def test_missing_variable(self):
-        lim = Limit(value=VarRef("v"), min=0)
-        with self.assertRaises(Exception):
+        lim = Limit(value=VarRef("v"), eq=VarRef("expected"))
+        with self.assertRaises(JudgeTypeError):
             judge(lim, {})
+
+    def test_non_finite_measurement_cannot_pass(self):
+        limit = Limit(value=VarRef("v"), min=0, max=10)
+        with self.assertRaises(JudgeTypeError):
+            judge(limit, {"v": float("nan")})
 
 
 if __name__ == "__main__":

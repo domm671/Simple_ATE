@@ -16,6 +16,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from simple_ate.communication.base import Frame
 from simple_ate.communication.mock_serial import MockSerialPort, parse_data
@@ -98,6 +99,21 @@ class TestMockSerialPort(unittest.TestCase):
 
 
 class TestSerialCommunication(unittest.TestCase):
+    def test_receive_caps_frame_size_even_with_all_bytes_buffered(self):
+        comm = self._open_serial([], max_frame=3)
+        self.addCleanup(comm.close)
+        comm._ser.inject(b"abcdef")
+        self.assertEqual(comm.recv(0.1).data, b"abc")
+        self.assertEqual(comm.recv(0.1).data, b"def")
+
+    def test_mock_delay_counts_against_receive_timeout(self):
+        comm = self._open_serial([{"request_data": "01", "response_data": "02", "delay": 0.1}])
+        self.addCleanup(comm.close)
+        comm.send(Frame(id=0, data=b"\x01"))
+        with self.assertRaises(TimeoutAteError):
+            comm.recv(0.005)
+        self.assertEqual(comm.recv(0.5).data, b"\x02")
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
 
@@ -217,6 +233,15 @@ class TestUsbPortResolution(unittest.TestCase):
         self.assertEqual(resolve_usb_port(serial_number="DUT-002"), "COM7")
         self.assertEqual(resolve_usb_port(vid=0xFFFF), "")
 
+    def test_ambiguous_usb_selection_fails(self):
+        self._install_fake_list_ports([
+            types.SimpleNamespace(device=port, vid=1, pid=2, serial_number=port)
+            for port in ("COM1", "COM2")
+        ])
+        self.assertEqual(resolve_usb_port(fallback="COM9"), "COM9")
+        with self.assertRaises(CommunicationError):
+            resolve_usb_port(vid=1, pid=2)
+
 
 class TestModbusSerial(unittest.TestCase):
     def setUp(self):
@@ -327,6 +352,44 @@ class _ModbusTcpSlave:
 
 
 class TestModbusTcp(unittest.TestCase):
+    def test_tcp_resumes_partial_frame_and_skips_stale_transaction(self):
+        from simple_ate.communication.modbus import build_tcp_adu
+
+        stale = build_tcp_adu(1, 3, b"\x03\x01\x0a")
+        expected = build_tcp_adu(2, 3, b"\x03\x01\x0b")
+
+        class FakeSocket:
+            def __init__(self):
+                self.reads = [stale, expected[:8], TimeoutError(), expected[8:]]
+
+            def settimeout(self, timeout):
+                pass
+
+            def sendall(self, data):
+                pass
+
+            def recv(self, count):
+                next_read = self.reads.pop(0)
+                if isinstance(next_read, TimeoutError):
+                    raise next_read
+                if len(next_read) > count:
+                    self.reads.insert(0, next_read[count:])
+                return next_read[:count]
+
+            def close(self):
+                pass
+
+        comm = ModbusCommunication("mb", modbus_mode="tcp", host="localhost",
+                                   socket_factory=lambda *args, **kwargs: FakeSocket())
+        comm.open()
+        self.addCleanup(comm.close)
+        request = Frame(id=3, data=b"\x03\x00\x00\x00\x01")
+        comm.send(request)
+        comm.send(request)
+        with self.assertRaises(TimeoutAteError):
+            comm.recv(0.1)
+        self.assertEqual(comm.recv(0.1).data, expected[7:])
+
     def test_tcp_roundtrip(self):
         response_pdu = b"\x03\x04\x00\x0B\x00\x0C"
         slave = _ModbusTcpSlave(unit=3, response_pdu=response_pdu).start()
@@ -347,6 +410,23 @@ class TestModbusTcp(unittest.TestCase):
                                    read_timeout=0.2)
         with self.assertRaises(CommunicationError):
             comm.open()
+
+
+class TestCanDriverErrors(unittest.TestCase):
+    def test_driver_exception_is_retryable_communication_error(self):
+        from simple_ate.communication.can import CanCommunication
+
+        class CanError(Exception):
+            pass
+
+        def fail(*args, **kwargs):
+            raise CanError("CAN 未连接")
+
+        fake_can = types.SimpleNamespace(CanError=CanError, Bus=fail)
+        with patch.dict(sys.modules, {"can": fake_can}):
+            with self.assertRaises(CommunicationError) as error:
+                CanCommunication("can").open()
+        self.assertTrue(error.exception.retryable)
 
 
 class TestEngineSerialMock(unittest.TestCase):

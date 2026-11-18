@@ -9,9 +9,12 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import xml.etree.ElementTree as ET
+from xml.parsers import expat
 
+from ..communication.modbus import MAX_PDU
 from ..errors import ScriptError, ScriptParseErrors
 from .model import (
     Action,
@@ -52,6 +55,14 @@ SEQ_LENGTHS = {0, 1, 2, 4}
 # CAN / Mock 使用 8 字节经典帧；串口/Modbus/USB 允许更长报文
 CAN_PROTOCOLS = {"can", "mock"}
 MAX_SERIAL_FRAME = 4096
+
+
+def _frame_limit(protocol: str) -> int:
+    if protocol in CAN_PROTOCOLS:
+        return 8
+    if protocol == "modbus":
+        return MAX_PDU
+    return MAX_SERIAL_FRAME
 
 # 仅文件传输模式可用的属性，用于 single 模式下的误用检查
 SEND_FILE_ATTRS = {"file", "chunk_size", "seq_len", "header", "interval"}
@@ -102,7 +113,7 @@ class _Errors:
     def add(self, message: str, code: str, el: ET.Element | None = None,
             line: int = 0, column: int = 0):
         ln = line or getattr(el, "_line", 0)
-        col = column or 0
+        col = column or getattr(el, "_column", 0)
         self.items.append(ScriptError(message, code, ln, col))
 
     def raise_if_any(self):
@@ -137,28 +148,12 @@ def _attr(el: ET.Element, name: str, default=None):
     return el.attrib.get(name, default)
 
 
-def _resolve_value_or_ref(raw: str) -> VarRef | str | int | float:
-    """limit value：整体变量引用 / 数值字面量 / 普通字符串。"""
-    m = _VARREF_RE.match(raw.strip())
-    if m:
-        return VarRef(m.group(1), *())  # line 由调用方补
-    try:
-        return int(raw)
-    except ValueError:
-        pass
-    try:
-        return float(raw)
-    except ValueError:
-        pass
-    return raw
-
-
 class ScriptParser:
     def __init__(self, station_resources: set[str] | None = None,
                  allowed_extensions: set[str] | None = None,
                  station_protocols: dict[str, str] | None = None):
-        self.station_resources = station_resources or set()
-        self.allowed_extensions = allowed_extensions or set()
+        self.station_resources = station_resources
+        self.allowed_extensions = allowed_extensions
         # 工位配置中各资源的协议（type），脚本 <connect protocol> 可覆盖。
         # 用于放宽 CAN 专属限制（8 字节 data、11 位 ID）到串口/Modbus/USB。
         self.station_protocols = station_protocols or {}
@@ -180,11 +175,9 @@ class ScriptParser:
             raise  # for type checkers
 
         try:
-            parser = _LineNumberingParser()
-            root = ET.fromstring(text, parser=parser)
-        except ET.ParseError as e:
-            line, col = e.position
-            errs.add(f"XML 非良构: {e.msg}", "E101", line=line, column=col)
+            root = _parse_xml(text)
+        except expat.ExpatError as e:
+            errs.add(f"XML 非良构: {e}", "E101", line=e.lineno, column=e.offset)
             errs.raise_if_any()
             raise  # unreachable
 
@@ -195,6 +188,12 @@ class ScriptParser:
         name = _attr(root, "name", "")
         version = _attr(root, "version", "")
         self._check_attrs(root, errs)
+        containers = {"test", "step", "wait"}
+        for el in root.iter():
+            if (el.text or "").strip() or any((child.tail or "").strip() for child in el):
+                errs.add(f"<{el.tag}> 不允许文本内容", "E102", el)
+            if el.tag not in containers and el.tag in ALLOWED_ATTRS and len(el):
+                errs.add(f"<{el.tag}> 不允许子元素", "E102", el)
         if not name or not _IDENT_RE.match(name or ""):
             errs.add("test 的 name 非法（需匹配 ^[A-Za-z0-9_-]+$）", "E105", root)
         if not _VERSION_RE.match(version or ""):
@@ -277,7 +276,7 @@ class ScriptParser:
                 protocol = None
         # 未指定 protocol 时资源必须在工位配置中定义；
         # 指定 protocol 时允许在脚本内联定义串口/Modbus/USB 资源。
-        if (resource and self.station_resources
+        if (resource and self.station_resources is not None
                 and resource not in self.station_resources and protocol is None):
             errs.add(
                 f"资源 {resource!r} 未在工位配置中定义"
@@ -287,7 +286,7 @@ class ScriptParser:
         if "timeout" in el.attrib:
             try:
                 timeout = float(el.attrib["timeout"])
-                if timeout <= 0:
+                if not math.isfinite(timeout) or timeout <= 0:
                     raise ValueError
             except ValueError:
                 errs.add("connect 的 timeout 必须是正数（秒）", "E105", el)
@@ -312,7 +311,9 @@ class ScriptParser:
         self._opt_enum(el, "modbus_mode", opts, errs, MODBUS_MODES)
         self._opt_int(el, "tcp_port", opts, errs, minimum=1, maximum=65535)
 
-        if not resource:
+        if not resource.strip():
+            if "resource" in el.attrib:
+                errs.add("connect 的 resource 不能为空", "E105", el)
             return None
         line, _ = _pos(el)
         return ConnectStmt(resource=resource, timeout=timeout, protocol=protocol,
@@ -321,6 +322,8 @@ class ScriptParser:
     def _parse_disconnect(self, el: ET.Element, errs: _Errors) -> DisconnectStmt | None:
         self._check_attrs(el, errs)
         resource = _attr(el, "resource", "")
+        if "resource" in el.attrib and not resource.strip():
+            errs.add("disconnect 的 resource 不能为空", "E105", el)
         line, _ = _pos(el)
         return DisconnectStmt(resource=resource, line=line) if resource else None
 
@@ -345,6 +348,8 @@ class ScriptParser:
         line, _ = _pos(el)
 
         name = _attr(el, "name", "")
+        if "name" in el.attrib and not name.strip():
+            errs.add("step 的 name 不能为空", "E105", el)
         if name:
             if name in step_names:
                 errs.add(f"step 名称 {name!r} 重复", "E106", el)
@@ -362,6 +367,8 @@ class ScriptParser:
         if resource is not None:
             if resource not in connected:
                 errs.add(f"step {name!r} 使用了尚未 connect 的资源 {resource!r}", "E210", el)
+        elif not connected:
+            errs.add(f"step {name!r} 执行前必须先 connect 资源", "E210", el)
         elif len(connected) > 1:
             errs.add(
                 f"step {name!r} 未指定 resource，但当前同时打开了多个资源 "
@@ -380,8 +387,7 @@ class ScriptParser:
         has_comm = False
         local_defined = set(defined_vars_in)
 
-        children = list(el)
-        for idx, child in enumerate(children):
+        for child in el:
             if child.tag not in STEP_TAGS:
                 code = "E107" if child.tag in {"if", "loop", "call"} else "E102"
                 hint = "（v2 预留标签，v1 不支持）" if code == "E107" else ""
@@ -487,7 +493,7 @@ class ScriptParser:
                         errs.add(
                             f"data token {tok!r} 非法：需为 00-FF 十六进制字节或单字节 ${{var}}",
                             "E105", el)
-            max_len = 8 if is_can else MAX_SERIAL_FRAME
+            max_len = _frame_limit(protocol)
             if len(data) > max_len:
                 errs.add(
                     f"data 最多 {max_len} 字节，实际 {len(data)} 字节",
@@ -516,7 +522,7 @@ class ScriptParser:
         drain = _attr(el, "drain", "before")
         if drain not in ("before", "off"):
             errs.add("wait 的 drain 只能是 before 或 off", "E105", el)
-        max_len = 8 if is_can else MAX_SERIAL_FRAME
+        max_len = _frame_limit(protocol)
         min_len = self._int_attr(el, "min_len", 0, errs, minimum=0)
         if min_len is not None and min_len > max_len:
             errs.add(f"min_len 不能超过 {max_len}", "E105", el)
@@ -539,7 +545,7 @@ class ScriptParser:
             if child.tag != "field":
                 errs.add(f"<wait> 内只允许 <field>，实际出现 <{child.tag}>", "E102", child)
                 continue
-            fields.append(self._parse_field(child, errs))
+            fields.append(self._parse_field(child, errs, max_len))
         if can_id is None:
             return None
         return Wait(
@@ -610,7 +616,7 @@ class ScriptParser:
                 "E122", el)
         return raw
 
-    def _parse_field(self, el: ET.Element, errs: _Errors) -> Field | None:
+    def _parse_field(self, el: ET.Element, errs: _Errors, max_len: int) -> Field | None:
         self._check_attrs(el, errs)
         line, _ = _pos(el)
         var = _attr(el, "var", "")
@@ -621,14 +627,14 @@ class ScriptParser:
         endian = _attr(el, "endian", "little")
         if endian not in ("little", "big"):
             errs.add("endian 只能是 little 或 big", "E105", el)
-        gain = self._num_attr(el, "gain", 1.0, errs, positive=False)
-        bias = self._num_attr(el, "bias", 0.0, errs, positive=False)
+        gain = self._num_attr(el, "gain", 1.0, errs, positive=None)
+        bias = self._num_attr(el, "bias", 0.0, errs, positive=None)
         raw = self._bool_attr(el, "raw", False, errs)
         unit = _attr(el, "unit")
         if length is not None and length > 8:
             errs.add("field length 不能超过 8 字节", "E117", el)
-        if offset is not None and length is not None and offset + length > 8:
-            errs.add(f"field {var!r} 提取范围 offset+length 超出 8 字节", "E117", el)
+        if offset is not None and length is not None and offset + length > max_len:
+            errs.add(f"field {var!r} 提取范围 offset+length 超出 {max_len} 字节", "E117", el)
         if not var or offset is None:
             return None
         return Field(
@@ -654,10 +660,10 @@ class ScriptParser:
             errs.add(f"action 的 var 非法: {var!r}", "E105", el)
 
         module = handler.split(":")[0] if handler and ":" in handler else ""
-        if handler:
-            if ":" not in handler or not all(part for part in handler.split(":")):
+        if "handler" in el.attrib:
+            if handler.count(":") != 1 or not all(part.isidentifier() for part in handler.split(":")):
                 errs.add(f"handler 格式必须是 \"module:func\"，实际 {handler!r}", "E202", el)
-            elif self.allowed_extensions and module not in self.allowed_extensions:
+            elif self.allowed_extensions is not None and module not in self.allowed_extensions:
                 errs.add(f"扩展模块 {module!r} 未在工位配置 [extensions] allowed 白名单中", "E201", el)
 
         kwargs: dict = {}
@@ -685,7 +691,7 @@ class ScriptParser:
                                attr="mode", default="auto") or "auto"
 
         if mode == "manual":
-            if not _attr(el, "prompt"):
+            if not _attr(el, "prompt", "").strip():
                 errs.add(
                     f"step {step_name!r} 的 limit mode=\"manual\" 必须给出 prompt",
                     "E119", el)
@@ -715,12 +721,12 @@ class ScriptParser:
         lo = hi = None
         if "min" in el.attrib:
             try:
-                lo = float(el.attrib["min"])
+                lo = _finite_float(el.attrib["min"])
             except ValueError:
                 errs.add(f"step {step_name!r} 的 min 不是数值", "E113", el)
         if "max" in el.attrib:
             try:
-                hi = float(el.attrib["max"])
+                hi = _finite_float(el.attrib["max"])
             except ValueError:
                 errs.add(f"step {step_name!r} 的 max 不是数值", "E113", el)
         if lo is not None and hi is not None and lo > hi:
@@ -746,9 +752,14 @@ class ScriptParser:
         except ValueError:
             pass
         try:
-            return float(token)
+            number = float(token)
         except ValueError:
             pass
+        else:
+            if math.isfinite(number):
+                return number
+            errs.add(f"step {step_name!r} 的 limit {attr} 必须是有限数值", "E114", el)
+            return token
         if attr == "eq" or not require_numeric:
             return token                      # eq / 人工判定允许字符串字面量
         errs.add(f"step {step_name!r} 的 limit {attr} 必须是数值或单个 ${{var}}", "E114", el)
@@ -801,7 +812,7 @@ class ScriptParser:
     def _check_chunk_fits(self, el: ET.Element, errs: _Errors, chunk_size: int,
                           header: tuple[int, ...], seq_len: int, protocol: str,
                           code: str = "E121") -> None:
-        limit = 8 if protocol in CAN_PROTOCOLS else MAX_SERIAL_FRAME
+        limit = _frame_limit(protocol)
         total = chunk_size + len(header) + seq_len
         if total > limit:
             errs.add(
@@ -835,7 +846,7 @@ class ScriptParser:
         if name not in el.attrib:
             return
         try:
-            value = float(el.attrib[name])
+            value = _finite_float(el.attrib[name])
         except ValueError:
             errs.add(f"<connect> 的 {name} 必须是数值", "E105", el)
             return
@@ -881,14 +892,15 @@ class ScriptParser:
         if name not in el.attrib:
             return default
         try:
-            v = float(el.attrib[name])
-            if positive and v <= 0:
+            v = _finite_float(el.attrib[name])
+            if positive is True and v <= 0:
                 raise ValueError
-            if not positive and v < 0:
+            if positive is False and v < 0:
                 raise ValueError
             return v
         except ValueError:
-            errs.add(f"<{el.tag}> 的 {name} 必须是{'正' if positive else '非负'}数", "E105", el)
+            sign = {True: "正", False: "非负", None: ""}[positive]
+            errs.add(f"<{el.tag}> 的 {name} 必须是有限{sign}数", "E105", el)
             return default
 
     def _int_attr(self, el, name, default, errs, minimum=0) -> int | None:
@@ -916,16 +928,40 @@ class ScriptParser:
         if attr not in el.attrib:
             return None
         try:
-            return _parse_can_id(el.attrib[attr])
+            value = _parse_can_id(el.attrib[attr])
         except ValueError:
             errs.add(f"<{el.tag}> 的 {attr} 非法", "E105", el)
             return None
+        if not 0 <= value <= 0x1FFFFFFF:
+            errs.add(f"<{el.tag}> 的 {attr} 超出 29 位无符号范围", "E116", el)
+        return value
 
 
-class _LineNumberingParser(ET.XMLParser):
-    """XMLParser 子类：_start 时用 expat 当前行号给元素打 _line。"""
+def _finite_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(value)
+    return number
 
-    def _start(self, tag, attr_list):
-        el = super()._start(tag, attr_list)
-        el._line = self.parser.CurrentLineNumber
-        return el
+
+class _LocatedElement(ET.Element):
+    """保存 XML 元素的源位置。"""
+
+
+def _parse_xml(text: str) -> ET.Element:
+    parser = expat.ParserCreate(namespace_separator="}")
+    tree = ET.TreeBuilder(element_factory=_LocatedElement)
+
+    def expanded(name: str) -> str:
+        return "{" + name if "}" in name else name
+
+    def start(name: str, attrs: dict[str, str]) -> None:
+        el = tree.start(expanded(name), {expanded(k): v for k, v in attrs.items()})
+        el._line = parser.CurrentLineNumber
+        el._column = parser.CurrentColumnNumber
+
+    parser.StartElementHandler = start
+    parser.EndElementHandler = lambda name: tree.end(expanded(name))
+    parser.CharacterDataHandler = tree.data
+    parser.Parse(text, True)
+    return tree.close()

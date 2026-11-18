@@ -10,6 +10,7 @@ from simple_ate.communication.base import Communication, Frame, ResourceConfig
 from simple_ate.communication.mock import MockCommunication
 from simple_ate.config_loader import StationConfig
 from simple_ate.engine import Engine, EngineListener
+from simple_ate.engine.model import ConnectStmt
 from simple_ate.engine.parser import ScriptParser
 from simple_ate.storage.file_store import FileResultStore
 
@@ -88,6 +89,49 @@ class TestExecution(unittest.TestCase):
         self.assertEqual(r.result, "PASS")
         self.assertAlmostEqual(r.items[0].value, 12.03)
         self.assertEqual(r.items[0].retries, 0)
+
+    def test_drain_pairs_send_and_wait_across_delay(self):
+        mock = self.mock([{"request_id": 16, "response_id": 17, "response_data": "02"}])
+        mock.inject(Frame(id=17, data=b"\xff"))
+        h = EngineHarness({"can": mock}, self.tmp)
+        result = h.run('''<test name="T" version="1.0"><connect resource="can"/>
+          <step name="S" timeout="0.1"><send id="16"/><delay ms="1"/>
+            <wait id="17"><field var="out" offset="0" raw="true"/></wait>
+            <limit value="${out}" eq="2"/></step></test>''')
+        self.assertEqual(result.result, "PASS")
+
+    def test_limit_uses_unit_for_its_own_measurement(self):
+        mock = self.mock([{"request_id": 16, "response_id": 17, "response_data": "0C 28"}])
+        result = EngineHarness({"can": mock}, self.tmp).run('''
+          <test name="T" version="1.0"><connect resource="can"/>
+            <step name="S"><send id="16"/><wait id="17">
+              <field var="voltage" offset="0" unit="V"/>
+              <field var="temperature" offset="1" unit="℃"/>
+            </wait><limit value="${voltage}" min="11" max="13"/></step></test>''')
+        self.assertEqual((result.result, result.items[0].value, result.items[0].unit), ("PASS", 12, "V"))
+
+    def test_non_retryable_send_error_reports_actual_attempt_count(self):
+        mock = self.mock([{"request_id": 16, "response_id": 17, "response_data": "02"}])
+        result = EngineHarness({"can": mock}, self.tmp).run('''
+          <test name="T" version="1.0"><connect resource="can"/>
+            <step name="S" retry="2"><send id="16"/>
+              <wait id="17"><field var="out" offset="0"/></wait>
+              <send id="16" data="${out}"/>
+            </step></test>''')
+        self.assertEqual((result.result, result.items[0].error_code, result.items[0].retries),
+                         ("ERROR", "E307", 0))
+
+    def test_disconnect_error_finishes_result_as_error(self):
+        class BrokenClose(ScriptedMock):
+            def close(self):
+                super().close()
+                raise OSError("关闭资源失败")
+
+        h = EngineHarness({"can": BrokenClose("can")}, self.tmp)
+        result = h.run('''<test name="T" version="1.0"><connect resource="can"/>
+                          <disconnect resource="can"/></test>''')
+        self.assertEqual(result.result, "ERROR")
+        self.assertEqual(h.store.recover_aborted(), 0)
 
     def test_fail_not_retried(self):
         # 应答 10.00V（0x03E8=1000），超出下限；FAIL 不重试 -> retries=0
@@ -326,6 +370,13 @@ class TestFileTransferExecution(unittest.TestCase):
 
 
 class TestBuildResourceOptions(unittest.TestCase):
+    def test_protocol_change_does_not_inherit_station_mock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            harness = EngineHarness({"can": ScriptedMock("can")}, Path(tmp))
+            harness.cfg.resources["can"].options["mock_script"] = "station_mock.json"
+            stmt = ConnectStmt(resource="can", protocol="serial", options=(("port", "COM9"),))
+            self.assertEqual(harness.engine._build_resource(stmt).mock_script, "")
+
     def test_script_inline_serial_overrides_station(self):
         from simple_ate.communication.base import ResourceConfig
         from simple_ate.engine.model import ConnectStmt

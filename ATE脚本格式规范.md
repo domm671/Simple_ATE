@@ -94,6 +94,7 @@ CAN 帧的 ID、数据、应答匹配方式、字段解析与换算全部以标�
 - 顶层允许的子元素**仅**：`connect`、`disconnect`、`step`、`delay`；
 - `step` 内允许的子元素**仅**：`send`、`wait`、`delay`、`action`、`limit`；
 - `wait` 内允许的子元素**仅**：`field`。
+- 叶子元素无子元素，元素内容只允许结构化标签与用于缩进的空白。语义错误使用从 1 开始的行号和从 0 开始的列号。
 
 ---
 
@@ -162,7 +163,7 @@ byte-token  = hex-byte | variable-ref ;       # data 中每个 token 占一个�
 | 属性 | 适用协议 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
 | `resource` | 全部 | 是 | — | 逻辑资源名，如 `can_main`、`rs485` |
-| `timeout` | 全部 | 否 | `3.0` | 打开资源超时（秒，float>0） |
+| `timeout` | Modbus TCP | 否 | `3.0` | TCP 建连超时（秒，有限数且大于 0）。其他协议接受该属性，连接时限由各自驱动决定 |
 | `protocol` | 全部 | 否 | 取工位配置 `type` | `can` / `serial` / `modbus` / `usb` / `mock` |
 | `interface` | can | 否 | 工位配置 | python-can 接口：`pcan`/`slcan`/`socketcan` 等 |
 | `channel` | can | 否 | 工位配置 | CAN 通道，如 `PCAN_USBBUS1`、`COM3`（slcan） |
@@ -187,12 +188,13 @@ byte-token  = hex-byte | variable-ref ;       # data 中每个 token 占一个�
 规则：
 
 - 未给 `protocol` 时，资源必须已存在于工位配置（否则 **E204**）；给了 `protocol` 时允许在脚本内联定义资源，脚本参数覆盖工位配置同名项；
+- 切换工位资源的协议时，其他适用参数仍可继承。`mock_script` 需在脚本中显式指定；
 - 参数值非法（未知协议、波特率非正、校验位未知等）→ **E105**；
-- 同一资源重复 `connect`：运行期错误 E304；
+- 同一资源重复 `connect`，或 `disconnect` 未连接的资源：加载期报 E210；
 - `connect` 失败属于设备异常，Run 直接以 **ERROR** 结束（E302）；
-- `disconnect` 幂等并关闭对应串口/CAN 句柄；**即使脚本不写，引擎也在 Run 结束的 `finally` 中关闭所有已打开资源**；
+- `disconnect` 关闭对应的通信句柄。引擎在 Run 结束的 `finally` 中关闭所有仍打开的资源，关闭失败记 E302；
 - `protocol="usb"` 本质是 USB CDC 虚拟串口，与 `serial` 共用收发原语；
-- `protocol="modbus"` 时 `<send>` 的 `id` 为从站地址、`data` 为 PDU（功能码 + 数据），本层自动加 CRC(LRC/MBAP)，`<wait>` 返回的 `data` 亦为 PDU。
+- `protocol="modbus"` 时 `<send>` 的 `id` 为从站地址（0 使用 `unit` 配置），`data` 为 PDU（功能码 + 数据，1–253 字节）。通信层附加 CRC、LRC 或 MBAP，`<wait>` 返回的 `data` 亦为 PDU。TCP 应答须匹配当前请求的事务号和单元地址。
 
 ```xml
 <!-- 串口：115200 8N1 -->
@@ -261,9 +263,9 @@ byte-token  = hex-byte | variable-ref ;       # data 中每个 token 占一个�
 `data` 规则：
 
 - 每个 token 占**恰好一个字节**：十六进制字面量（`00`–`FF`，大小写不敏感）或单字节变量引用 `${name}`；
-- token 总数 0–8，超过 8 报 E115；
+- token 上限为 CAN/Mock 8 字节、Modbus 253 字节、串口/USB 4096 字节，超限报 E115；
 - 字面量超出 `0xFF` 报 E105；
-- 变量必须在**本 step 之前**已由 `field` 或 `action var` 定义，且运行期值为 0–255 的 int；否则分别报 E208 / E307。
+- 变量必须在**当前指令之前**已由 `field` 或 `action var` 定义，且运行期值为 0–255 的 int；否则分别报 E208 / E307。
 
 ```xml
 <send id="0x18FF50E5" ext="true" data="02 01 00"/>
@@ -291,19 +293,19 @@ byte-token  = hex-byte | variable-ref ;       # data 中每个 token 占一个�
 |---|---|---|---|---|
 | `file` | 是 | 路径 | — | 接收保存路径；相对路径以脚本所在目录为基准，原子落盘 |
 | `chunk_size` | 否 | int | 整帧剩余 | 每帧有效数据字节数，超出部分截断 |
-| `seq_len` | 否 | 枚举 | `0` | 每帧序号字节数，与发送侧一致；有值时按序号排序去重 |
+| `seq_len` | 否 | 枚举 | `0` | 每帧序号字节数，与发送侧一致。启用时从 0 开始连续编号，支持乱序和相同内容的重复帧 |
 | `header` | 否 | 字节串 | 空 | 期望前缀，不匹配的帧被忽略 |
 | `size` | 终止条件之一 | int(≥0) | — | 期望总字节数，收满即完成 |
 | `chunks` | 终止条件之一 | int(≥1) | — | 期望帧数，收满即完成 |
 | `idle_gap` | 终止条件之一 | 秒(>0) | — | 收到数据后静默超过该秒数即视为完成 |
 | `max_size` | 否 | int | `64MiB` | 安全上限，超出抛 E308 |
 | `checksum` | 否 | 枚举 | `none` | `none`/`crc32`/`crc16_modbus`/`sum8` |
-| `checksum_value` | 否 | 十六进制/`${var}` | — | 期望校验值；给出时 `checksum` 不能为 none |
+| `checksum_value` | 否 | 十六进制/`${var}` | — | 按校验字节顺序给出期望值。整数变量按校验长度转为大端字节串。提供期望值后才做校验，此时 `checksum` 必须指定算法 |
 | `timeout` | 否 | 秒(float>0) | 取 step 的 `timeout` | 总体等待上限；大文件应显式放大 |
 
 语义：
 
-1. `drain="before"`（默认）在**发送请求帧之前**先排空接收队列，避免收到上一交互的残留帧（注意是发送前而非接收后，这样同步实现下 send 立即产生的应答不会被误删）；独立 `<wait>`（前面没有配对 send）则在等待开始时清空；
+1. `drain="before"`（默认）在**发送请求帧之前**排空接收队列。`send` 和 `wait` 之间可以有 `delay` 指令。独立 `<wait>` 在等待开始时清空；
 2. 在剩余 timeout 内循环接收，按 ID 类型 + ID（+mask）匹配，**无关帧丢弃但全部写 trace**；
 3. 命中但长度不足 `min_len`：丢弃并继续等；
 4. 超时未收到有效帧 → 通信异常 E301，触发 retry；
@@ -320,7 +322,7 @@ byte-token  = hex-byte | variable-ref ;       # data 中每个 token 占一个�
 
 <!-- 接收设备回传的文件：直到收满 4096 字节 -->
 <wait id="0x18FF0002" ext="true" mode="file" file="recv/log.bin"
-      chunk_size="7" seq_len="1" size="4096" checksum="crc32"/>
+      chunk_size="6" seq_len="2" size="4096"/>
 ```
 
 ### 5.6 `<field>`（字段提取与换算）
@@ -347,6 +349,8 @@ value   = raw_int * gain + bias       (默认)
 规则：
 
 - 提取范围超出应答帧实际长度 → 运行期 E305（通信类异常，可重试）；
+- 加载期检查 `offset + length` 是否超过协议的帧上限。串口、USB 和 Modbus 的 `offset` 可大于 7，单字段长度仍为 1–8 字节；
+- `gain` 和 `bias` 接受有限浮点数，允许负数；
 - 同一 wait 可提取多个 field；同一 step 内变量可被后续 send/limit 引用；
 - v0.1 只支持**无符号整数字节段**；有符号、BCD、位域、ASCII 在后续版本或用扩展 action；
 - `unit` 仅记录用，不参与判定。
@@ -368,6 +372,7 @@ value   = raw_int * gain + bias       (默认)
 - `min`/`max`/`eq` 至少一个（E111）；`eq` 与 `min`/`max` 互斥（E112）；
 - 同时给 min、max 时须 `min ≤ max`（E113）；
 - 数值位属性必须整体是数值字面量或单个 `${var}`，不允许混合文本（E114）。
+- 数值判定要求有限数值。测量变量未产出或其值为非有限数时，运行期报 E209。
 
 人工判定（`mode="manual"`）：
 
@@ -495,14 +500,13 @@ PENDING → RUNNING ─ 全部通信成功且判定通过 ───────�
 ### 8.7 文件传输语义
 
 - **发送**（`<send mode="file">`）：按 `chunk_size` 顺序读文件，每帧 = `header` + 小端序号（`seq_len` 字节） + 数据块，逐帧 `send`；
-  帧间 `interval` 与停止标志每 50ms 检查；空文件不发帧；文件不存在抛 E308；
+  帧间 `interval` 与停止标志每 50ms 检查。空文件不发帧，读文件失败或分块数超出序号容量时报 E308；
 - **接收**（`<wait mode="file">`）：循环接收匹配 ID 的帧，剥离 `header`/序号后拼装；
-  `seq_len>0` 时按序号排序并去重；
-  到达 `size`/`chunks`/`idle_gap` 任一终止条件后，校验长度与可选 `checksum`，
-  原子写入 `file`（临时文件 + `os.replace`）；超过 `max_size` 或校验失败抛 E308；
+  同时检查 `min_len`。启用序号时，乱序帧按序号拼装，缺号或重复序号的内容不一致时报 E308；
+  到达 `size`/`chunks`/`idle_gap` 任一终止条件后，校验长度与可选校验值，原子写入 `file`。整体超时前未达到任何终止条件时抛 E301。超过 `max_size`、校验失败或写入失败时抛 E308；
 - 文件相对路径以**脚本所在目录**为基准；
 - 文件传输的 step 测量值为接收字节数（`unit="B"`）；
-- 中断/异常时残留 `.part` 临时文件会被下次写入覆盖，不会当作结果交付。
+- 每次写入使用独立的同目录临时文件，成功才替换目标文件。超时、校验失败或中止时保留已有目标文件。
 
 ---
 
@@ -537,7 +541,7 @@ def enter_extended_session(ctx, resource, **params):
 规则：
 
 1. 扩展模块必须在 `station.toml` 的 `[extensions] allowed` 白名单中，否则加载期 E201；
-2. `handler` 模块不存在、函数不存在 → 加载期 E202；
+2. 编辑器静态检查 `handler` 格式和白名单。执行器在打开通信资源前加载扩展，模块或函数不可用时报 E202；
 3. 入参全部以字符串传入（经过 `${}` 替换），函数自行做类型转换；
 4. 扩展 action 与内建原语混用在同一 step，顺序执行，适用同一套 step timeout/retry/on_fail；
 5. **普通产品测试不应需要扩展**；扩展是给现场集成复杂工装用的例外通道。
@@ -564,7 +568,7 @@ def enter_extended_session(ctx, resource, **params):
 | E112 | eq 与 min/max 混用 |
 | E113 | min > max，或限值非数值 |
 | E114 | 数值位属性出现混合文本 |
-| E115 | send data 超过协议上限（CAN 8 字节 / 串口 4096 字节） |
+| E115 | send data 超过协议上限（CAN/Mock 8 字节、Modbus 253 字节、串口/USB 4096 字节） |
 | E116 | CAN ID 超出对应帧类型范围（标准帧 ≤0x7FF） |
 | E117 | field 的 offset/length 静态越界（length>8 等） |
 | E119 | `limit mode="manual"` 缺少 `prompt` |
@@ -575,7 +579,7 @@ def enter_extended_session(ctx, resource, **params):
 | E202 | 扩展模块或 handler 函数不存在 |
 | E204 | 资源未在工位配置中定义 |
 | E208 | 变量在定义之前被引用 / 未定义 |
-| E210 | 资源连接/使用错误：同时打开多个资源但 step 未指定 `resource`、指定了未连接资源、重复 connect、disconnect 未连接资源 |
+| E210 | 资源连接或使用错误：step 前未打开资源、多个资源同时打开且 step 未指定 `resource`、指定未连接的资源、重复 connect、disconnect 未连接资源 |
 
 ### 10.2 运行期
 

@@ -20,6 +20,7 @@ from ..errors import CommunicationError, TimeoutAteError
 from .base import Frame
 from .serial import build_serial_kwargs, default_serial_factory
 
+MAX_PDU = 253
 
 # ---------------------------------------------------------------- 纯函数
 def crc16_modbus(data: bytes) -> bytes:
@@ -43,7 +44,7 @@ def build_rtu_adu(unit: int, pdu: bytes) -> bytes:
 
 
 def parse_rtu_adu(adu: bytes) -> tuple[int, bytes]:
-    if len(adu) < 5:
+    if len(adu) < 4:
         raise CommunicationError(f"Modbus RTU 应答长度不足: {adu.hex().upper()}")
     body, crc = adu[:-2], adu[-2:]
     if crc != crc16_modbus(body):
@@ -59,9 +60,9 @@ def build_ascii_adu(unit: int, pdu: bytes) -> bytes:
 
 
 def parse_ascii_adu(adu: bytes) -> tuple[int, bytes]:
-    text = adu.strip()
-    if text.startswith(b":"):
-        text = text[1:]
+    if not adu.startswith(b":") or not adu.endswith(b"\r\n"):
+        raise CommunicationError(f"Modbus ASCII 应答缺少起止标记: {adu!r}")
+    text = adu[1:-2]
     try:
         raw = bytes.fromhex(text.decode("ascii"))
     except (ValueError, UnicodeDecodeError) as exc:
@@ -87,7 +88,9 @@ def parse_tcp_adu(adu: bytes) -> tuple[int, int, bytes]:
         raise CommunicationError(f"Modbus TCP 应答长度不足: {adu.hex().upper()}")
     txid = int.from_bytes(adu[0:2], "big")
     length = int.from_bytes(adu[4:6], "big")
-    if length < 2 or len(adu) < 6 + length:
+    if adu[2:4] != b"\x00\x00":
+        raise CommunicationError("Modbus TCP 协议号必须为 0")
+    if not 2 <= length <= 1 + MAX_PDU or len(adu) != 6 + length:
         raise CommunicationError(f"Modbus TCP 长度字段非法: {adu.hex().upper()}")
     unit = adu[6]
     pdu = adu[7:6 + length]
@@ -105,7 +108,7 @@ class ModbusCommunication:
                  unit: int = 1, mock_script: str = "",
                  serial_factory: Callable[..., Any] | None = None,
                  socket_factory: Callable[..., Any] | None = None,
-                 **options):
+                 connect_timeout: float | None = None):
         self.name = name
         self.mode = (modbus_mode or "rtu").lower()
         self.port = port
@@ -115,6 +118,7 @@ class ModbusCommunication:
         self.stopbits = stopbits
         self.flowcontrol = flowcontrol
         self.read_timeout = read_timeout
+        self.connect_timeout = read_timeout if connect_timeout is None else connect_timeout
         self.frame_gap = frame_gap
         self.max_frame = max_frame
         self.host = host
@@ -126,16 +130,20 @@ class ModbusCommunication:
         self._ser = None
         self._sock: socket.socket | None = None
         self._txid = 0
+        self._tcp_unit: int | None = None
+        self._rx = bytearray()
 
     # ------------------------------------------------------------ 生命周期
     def open(self) -> None:
+        if self.mode not in ("rtu", "ascii", "tcp"):
+            raise CommunicationError(f"[{self.name}] 未知 Modbus 模式: {self.mode}")
         if self.mode == "tcp":
             if not self.host:
                 raise CommunicationError(f"[{self.name}] Modbus TCP 需要 host")
             factory = self.socket_factory or socket.create_connection
             try:
                 self._sock = factory(
-                    (self.host, self.tcp_port), timeout=self.read_timeout)
+                    (self.host, self.tcp_port), timeout=self.connect_timeout)
             except OSError as exc:
                 raise CommunicationError(
                     f"[{self.name}] 连接 Modbus TCP {self.host}:{self.tcp_port} "
@@ -163,6 +171,8 @@ class ModbusCommunication:
                 f"[{self.name}] 打开 Modbus 串口 {self.port} 失败: {exc}") from exc
 
     def close(self) -> None:
+        self._rx.clear()
+        self._tcp_unit = None
         if self._ser is not None:
             try:
                 self._ser.close()
@@ -178,103 +188,141 @@ class ModbusCommunication:
     def send(self, frame: Frame) -> None:
         unit = frame.id if frame.id else self.unit
         pdu = bytes(frame.data)
+        if not 0 <= unit <= (255 if self.mode == "tcp" else 247):
+            raise CommunicationError(f"[{self.name}] Modbus 单元地址无效: {unit}")
+        if not 1 <= len(pdu) <= MAX_PDU:
+            raise CommunicationError(f"[{self.name}] Modbus PDU 长度须为 1–{MAX_PDU} 字节")
+        if self.mode != "tcp" and self._ser is None:
+            raise CommunicationError(f"[{self.name}] Modbus 串口未打开")
         try:
             if self.mode == "tcp":
                 self._txid = (self._txid + 1) & 0xFFFF
                 self._sock_send(build_tcp_adu(self._txid, unit, pdu))
-            elif self.mode == "ascii":
-                self._ser.write(build_ascii_adu(unit, pdu))
-                self._ser.flush()
+                self._tcp_unit = unit
             else:
-                self._ser.write(build_rtu_adu(unit, pdu))
+                adu = (build_ascii_adu(unit, pdu) if self.mode == "ascii"
+                       else build_rtu_adu(unit, pdu))
+                if self._ser.write(adu) != len(adu):
+                    raise CommunicationError(f"[{self.name}] Modbus 串口写入不完整")
                 self._ser.flush()
-        except (CommunicationError, OSError) as exc:
-            if isinstance(exc, CommunicationError):
-                raise
+        except OSError as exc:
             raise CommunicationError(f"[{self.name}] Modbus 发送失败: {exc}") from exc
 
     def recv(self, timeout: float) -> Frame:
+        if self.mode != "tcp" and self._ser is None:
+            raise CommunicationError(f"[{self.name}] Modbus 串口未打开")
+        deadline = time.monotonic() + max(0.0, timeout)
         try:
             if self.mode == "tcp":
-                unit, pdu = self._recv_tcp(timeout)
+                unit, pdu = self._recv_tcp(deadline, nonblocking=timeout <= 0)
             elif self.mode == "ascii":
-                unit, pdu = self._recv_ascii(timeout)
+                unit, pdu = self._recv_ascii(deadline)
             else:
-                unit, pdu = self._recv_rtu(timeout)
+                unit, pdu = self._recv_rtu(deadline)
         except OSError as exc:
             raise CommunicationError(f"[{self.name}] Modbus 接收失败: {exc}") from exc
         return Frame(id=unit, data=pdu, ext=False, timestamp=time.time())
 
+    def discard_input(self) -> bool:
+        if self.mode == "tcp":
+            return False
+        if self._ser is None:
+            raise CommunicationError(f"[{self.name}] Modbus 串口未打开")
+        try:
+            self._ser.reset_input_buffer()
+        except OSError as exc:
+            raise CommunicationError(f"[{self.name}] 清空 Modbus 串口缓冲失败: {exc}") from exc
+        self._rx.clear()
+        return True
+
     # ------------------------------------------------------------ 内部：串口
-    def _read_exact(self, n: int, timeout: float) -> bytes:
-        deadline = time.monotonic() + max(0.0, timeout)
-        buf = bytearray()
-        while len(buf) < n:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutAteError(
-                    f"[{self.name}] Modbus 读取超时，已收 {len(buf)}/{n} 字节")
-            self._ser.timeout = remaining
-            chunk = self._ser.read(n - len(buf))
+    def _read_serial(self, n: int, deadline: float) -> None:
+        while len(self._rx) < n:
+            self._ser.timeout = max(0.0, deadline - time.monotonic())
+            chunk = self._ser.read(n - len(self._rx))
             if not chunk:
-                raise TimeoutAteError(
-                    f"[{self.name}] Modbus 读取超时，已收 {len(buf)}/{n} 字节")
-            buf += chunk
-        return bytes(buf)
+                raise TimeoutAteError(f"[{self.name}] Modbus 串口读取超时")
+            self._rx += chunk
 
-    def _recv_rtu(self, timeout: float) -> tuple[int, bytes]:
-        head = self._read_exact(3, timeout)
-        func = head[1]
+    def _take(self, size: int) -> bytes:
+        data = bytes(self._rx[:size])
+        del self._rx[:size]
+        return data
+
+    def _recv_rtu(self, deadline: float) -> tuple[int, bytes]:
+        self._read_serial(3, deadline)
+        func = self._rx[1]
         if func & 0x80:                       # 异常应答：unit+func+code+crc
-            rest = self._read_exact(2, timeout)
-        elif func in (1, 2, 3, 4):            # 读类：unit+func+bytecount+data+crc
-            rest = self._read_exact(head[2] + 2, timeout)
-        else:                                  # 写类等：固定 8 字节
-            rest = self._read_exact(5, timeout)
-        return parse_rtu_adu(head + rest)
+            size = 5
+        elif func in (1, 2, 3, 4, 12, 17, 20, 21, 23):
+            size = self._rx[2] + 5
+        elif func in (5, 6, 11, 15, 16):
+            size = 8
+        elif func == 7:
+            size = 5
+        elif func == 22:
+            size = 10
+        elif func == 24:
+            self._read_serial(4, deadline)
+            size = int.from_bytes(self._rx[2:4], "big") + 6
+        else:
+            # 未知功能码按 RTU 静默间隔分帧。
+            while len(self._rx) <= min(self.max_frame, MAX_PDU + 3):
+                gap_end = time.monotonic() + self.frame_gap
+                try:
+                    self._read_serial(len(self._rx) + 1, min(deadline, gap_end))
+                except TimeoutAteError:
+                    if time.monotonic() < gap_end:
+                        raise
+                    break
+            size = len(self._rx)
+        if size > min(self.max_frame, MAX_PDU + 3):
+            self._rx.clear()
+            raise CommunicationError(f"[{self.name}] Modbus RTU 帧过长")
+        self._read_serial(size, deadline)
+        return parse_rtu_adu(self._take(size))
 
-    def _recv_ascii(self, timeout: float) -> tuple[int, bytes]:
-        deadline = time.monotonic() + max(0.0, timeout)
-        buf = bytearray()
-        while b"\r\n" not in buf:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutAteError(f"[{self.name}] Modbus ASCII 读取超时")
-            self._ser.timeout = remaining
-            chunk = self._ser.read(1)
-            if not chunk:
-                raise TimeoutAteError(f"[{self.name}] Modbus ASCII 读取超时")
-            buf += chunk
-            if len(buf) > self.max_frame * 2 + 8:
+    def _recv_ascii(self, deadline: float) -> tuple[int, bytes]:
+        while not self._rx.endswith(b"\r\n"):
+            self._read_serial(len(self._rx) + 1, deadline)
+            if self._rx[-1] == ord(":"):
+                self._rx[:] = b":"
+            if len(self._rx) > min(self.max_frame, MAX_PDU + 2) * 2 + 3:
+                self._rx.clear()
                 raise CommunicationError(f"[{self.name}] Modbus ASCII 帧过长")
-        return parse_ascii_adu(bytes(buf))
+        return parse_ascii_adu(self._take(len(self._rx)))
 
     # ------------------------------------------------------------ 内部：TCP
     def _sock_send(self, data: bytes) -> None:
         if self._sock is None:
             raise CommunicationError(f"[{self.name}] Modbus TCP 未连接")
+        self._sock.settimeout(self.read_timeout)
         self._sock.sendall(data)
 
-    def _sock_read_exact(self, n: int, timeout: float) -> bytes:
+    def _read_tcp(self, n: int, deadline: float) -> None:
         if self._sock is None:
             raise CommunicationError(f"[{self.name}] Modbus TCP 未连接")
-        deadline = time.monotonic() + max(0.0, timeout)
-        buf = bytearray()
-        while len(buf) < n:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutAteError(
-                    f"[{self.name}] Modbus TCP 读取超时，已收 {len(buf)}/{n} 字节")
-            self._sock.settimeout(remaining)
-            chunk = self._sock.recv(n - len(buf))
+        while len(self._rx) < n:
+            self._sock.settimeout(max(0.0, deadline - time.monotonic()))
+            try:
+                chunk = self._sock.recv(n - len(self._rx))
+            except (TimeoutError, BlockingIOError) as exc:
+                raise TimeoutAteError(f"[{self.name}] Modbus TCP 读取超时") from exc
             if not chunk:
                 raise CommunicationError(f"[{self.name}] Modbus TCP 连接关闭")
-            buf += chunk
-        return bytes(buf)
+            self._rx += chunk
 
-    def _recv_tcp(self, timeout: float) -> tuple[int, bytes]:
-        head = self._sock_read_exact(7, timeout)
-        length = int.from_bytes(head[4:6], "big")
-        body = self._sock_read_exact(max(0, length - 1), timeout)
-        _, unit, pdu = parse_tcp_adu(head + body)
-        return unit, pdu
+    def _recv_tcp(self, deadline: float, nonblocking: bool) -> tuple[int, bytes]:
+        while True:
+            self._read_tcp(7, deadline)
+            length = int.from_bytes(self._rx[4:6], "big")
+            if not 2 <= length <= 1 + MAX_PDU:
+                self.close()
+                raise CommunicationError(f"[{self.name}] Modbus TCP 长度字段无效: {length}")
+            self._read_tcp(6 + length, deadline)
+            txid, unit, pdu = parse_tcp_adu(self._take(6 + length))
+            if (nonblocking or self._tcp_unit is None
+                    or (txid == self._txid and unit == self._tcp_unit)):
+                return unit, pdu
+            if time.monotonic() >= deadline:
+                raise TimeoutAteError(f"[{self.name}] Modbus TCP 未收到当前事务的应答")

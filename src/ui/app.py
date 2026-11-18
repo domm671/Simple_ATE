@@ -13,11 +13,7 @@ import sys
 from pathlib import Path
 
 from ..config_loader import load_config
-
-
-def _resolve(cfg, path: str) -> Path:
-    p = Path(path)
-    return p if p.is_absolute() else cfg.base_dir / p
+from ..storage.file_store import FileResultStore
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,18 +28,22 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
 
-    cfg = load_config(args.config)
-    log_dir = _resolve(cfg, cfg.storage.log_dir)
-    result_dir = _resolve(cfg, cfg.storage.result_dir)
+    try:
+        cfg = load_config(args.config)
+        log_dir = cfg.resolve_path(cfg.storage.log_dir)
+        result_dir = cfg.resolve_path(cfg.storage.result_dir)
+        recovered = FileResultStore(result_dir, mes_enabled=cfg.mes.enabled).recover_aborted()
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        print(f"无法初始化工位：{exc}", file=sys.stderr)
+        return 2
     # 脚本目录约定为配置文件同级的 ../scripts，可用环境变量覆盖
     scripts_dir = Path(os.environ.get(
         "SIMPLE_ATE_SCRIPTS", cfg.base_dir.parent / "scripts"))
-    log_dir.mkdir(parents=True, exist_ok=True)
-    result_dir.mkdir(parents=True, exist_ok=True)
-
     app = QApplication.instance() or QApplication(sys.argv)
     from .main_window import MainWindow
     win = MainWindow(cfg, log_dir, result_dir, scripts_dir)
+    if recovered:
+        win._append_log("warning", f"启动恢复：{recovered} 个未完成 Run 标记为 ABORT")
     win.show()
     return app.exec()
 

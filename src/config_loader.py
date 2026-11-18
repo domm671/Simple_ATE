@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from .communication.base import ResourceConfig
 
@@ -15,6 +16,23 @@ class SnConfig:
     validation_enabled: bool = False
     pattern: str = ".*"
     auto_start: bool = True
+
+    def validation_error(self, sn: str) -> str:
+        if not sn.strip():
+            return "SN 不能为空"
+        if self.validation_enabled:
+            try:
+                if re.fullmatch(self.pattern, sn) is None:
+                    return f"SN 不符合规则：{self.pattern}"
+            except (re.error, TypeError):
+                return f"工位配置中的 SN 规则无效：{self.pattern}"
+        return ""
+
+
+def sn_filename(sn: str) -> str:
+    """生成跨平台的文件名片段，原始 SN 仍保存到结果 JSON。"""
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", sn)[:100].strip(" .") or "SN"
+    return f"_{safe}" if PureWindowsPath(safe).is_reserved() else safe
 
 
 @dataclass
@@ -47,6 +65,9 @@ class StationConfig:
 
     def resource_names(self) -> set[str]:
         return set(self.resources.keys())
+
+    def resolve_path(self, path: str) -> Path:
+        return self.base_dir / path
 
 
 def load_config(path: str | Path) -> StationConfig:

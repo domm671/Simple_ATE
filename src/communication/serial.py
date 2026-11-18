@@ -65,6 +65,9 @@ def resolve_usb_port(vid: int | None = None, pid: int | None = None,
         raise CommunicationError(
             "未安装 pyserial，无法按 USB VID/PID 自动查找串口；"
             "请安装 pyserial 或直接给出 port") from exc
+    if vid is None and pid is None and not serial_number:
+        return fallback
+    matches = []
     for info in list_ports.comports():
         if vid is not None and info.vid != int(vid):
             continue
@@ -72,8 +75,10 @@ def resolve_usb_port(vid: int | None = None, pid: int | None = None,
             continue
         if serial_number and info.serial_number != serial_number:
             continue
-        return info.device
-    return fallback
+        matches.append(info.device)
+    if len(matches) > 1:
+        raise CommunicationError(f"USB 筛选条件匹配多个设备: {', '.join(matches)}")
+    return matches[0] if matches else fallback
 
 
 class SerialCommunication:
@@ -86,8 +91,7 @@ class SerialCommunication:
                  vid: int | None = None, pid: int | None = None,
                  serial_number: str | None = None, resolve_usb: bool = False,
                  mock_script: str = "",
-                 serial_factory: Callable[..., Any] | None = None,
-                 **options):
+                 serial_factory: Callable[..., Any] | None = None):
         self.name = name
         self.port = port
         self.baudrate = baudrate
@@ -105,6 +109,8 @@ class SerialCommunication:
         self.mock_script = mock_script
         self.serial_factory = serial_factory
         self._ser = None
+        self._rx = bytearray()
+        self._last_rx = 0.0
 
     # ------------------------------------------------------------ 生命周期
     def open(self) -> None:
@@ -136,6 +142,7 @@ class SerialCommunication:
                 f"[{self.name}] 打开串口 {port} 失败: {exc}") from exc
 
     def close(self) -> None:
+        self._rx.clear()
         if self._ser is not None:
             try:
                 self._ser.close()
@@ -146,7 +153,8 @@ class SerialCommunication:
     def send(self, frame: Frame) -> None:
         self._ensure_open()
         try:
-            self._ser.write(frame.data)
+            if self._ser.write(frame.data) != len(frame.data):
+                raise OSError("串口写入不完整")
             self._ser.flush()
         except Exception as exc:  # noqa: BLE001
             raise CommunicationError(f"[{self.name}] 串口发送失败: {exc}") from exc
@@ -154,26 +162,38 @@ class SerialCommunication:
     def recv(self, timeout: float) -> Frame:
         self._ensure_open()
         ser = self._ser
-        ser.timeout = max(0.0, timeout)
+        deadline = time.monotonic() + max(0.0, timeout)
         try:
-            first = ser.read(1)
+            while len(self._rx) < self.max_frame:
+                now = time.monotonic()
+                gap_end = self._last_rx + self.frame_gap
+                if self._rx and timeout > 0 and now >= gap_end and not ser.in_waiting:
+                    break
+                end = min(deadline, gap_end) if self._rx and timeout > 0 else deadline
+                ser.timeout = max(0.0, end - now)
+                count = min(max(1, ser.in_waiting), self.max_frame - len(self._rx))
+                chunk = ser.read(count)
+                if not chunk:
+                    break
+                self._rx += chunk
+                self._last_rx = time.monotonic()
         except Exception as exc:  # noqa: BLE001
             raise CommunicationError(f"[{self.name}] 串口读取失败: {exc}") from exc
-        if not first:
+        if (not self._rx or (timeout > 0 and len(self._rx) < self.max_frame
+                            and time.monotonic() - self._last_rx < self.frame_gap)):
             raise TimeoutAteError(f"[{self.name}] 等待串口数据超时（{timeout}s）")
-        buf = bytearray(first)
-        # 读到静默间隔即认为一帧结束；限制单帧最大长度避免异常时无限读取
-        ser.timeout = self.frame_gap
-        while len(buf) < self.max_frame:
-            try:
-                waiting = ser.in_waiting
-                chunk = ser.read(waiting if waiting > 0 else 1)
-            except Exception as exc:  # noqa: BLE001
-                raise CommunicationError(f"[{self.name}] 串口读取失败: {exc}") from exc
-            if not chunk:
-                break
-            buf += chunk
-        return Frame(id=0, data=bytes(buf), ext=False, timestamp=time.time())
+        frame = Frame(id=0, data=bytes(self._rx), ext=False, timestamp=time.time())
+        self._rx.clear()
+        return frame
+
+    def discard_input(self) -> bool:
+        self._ensure_open()
+        try:
+            self._ser.reset_input_buffer()
+        except OSError as exc:
+            raise CommunicationError(f"[{self.name}] 清空串口缓冲失败: {exc}") from exc
+        self._rx.clear()
+        return True
 
     # ------------------------------------------------------------ 内部
     def _ensure_open(self) -> None:

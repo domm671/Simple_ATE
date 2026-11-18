@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import logging
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -12,7 +14,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .. import __version__
 from ..communication.base import Communication, Frame
 from ..communication.can import CanCommunication
 from ..communication.mock import MockCommunication
@@ -24,7 +25,8 @@ from ..errors import (
     EngineBug,
     ExtensionError,
     RuntimeAteError,
-    SimpleAteError,
+    ScriptError,
+    ScriptParseErrors,
     TimeoutAteError,
 )
 from ..logging_conf import TraceLogger
@@ -44,6 +46,7 @@ from .model import (
     Script,
     Send,
     Step,
+    VarRef,
     Wait,
 )
 
@@ -70,17 +73,6 @@ class EngineListener:
 
 
 @dataclass
-class _CollectingListener(EngineListener):
-    """默认监听器：转 logger。"""
-
-    logger: Any = None
-
-    def on_log(self, level, message):
-        if self.logger:
-            getattr(self.logger, level.lower(), self.logger.info)(message)
-
-
-@dataclass
 class Engine:
     config: StationConfig
     store: ResultStore
@@ -89,6 +81,7 @@ class Engine:
     stop_event: threading.Event = field(default_factory=threading.Event)
     trace: TraceLogger | None = None
     extensions: ExtensionLoader | None = None
+    logger: logging.Logger | None = None
 
     # ------------------------------------------------------------ 资源工厂
     def _build_resource(self, stmt: ConnectStmt) -> Communication:
@@ -100,8 +93,11 @@ class Engine:
         name = stmt.resource
         spec = self.config.resources.get(name)
         options: dict[str, Any] = dict(spec.options) if spec else {}
-        options.update(stmt.options_dict())
         proto = stmt.protocol or (spec.type if spec else None)
+        if spec and proto != spec.type:
+            # 更换协议时必须显式启用 Mock，避免实机脚本误走工位的模拟应答。
+            options.pop("mock_script", None)
+        options.update(stmt.options_dict())
         if proto is None:
             raise CommunicationError(
                 f"资源 {name!r} 未在工位配置中定义，且 <connect> 未指定 protocol")
@@ -120,7 +116,8 @@ class Engine:
             opts["resolve_usb"] = True
             return SerialCommunication(name, **opts)
         if proto == "modbus":
-            return ModbusCommunication(name, **self._modbus_options(options))
+            return ModbusCommunication(name, connect_timeout=stmt.timeout,
+                                       **self._modbus_options(options))
         raise CommunicationError(f"未知资源类型/协议: {proto}")
 
     def _resolve_mock_script(self, mock_script: str) -> str:
@@ -167,46 +164,55 @@ class Engine:
 
     # ------------------------------------------------------------ Run
     def run(self, script: Script, sn: str, trace_path: str | Path | None = None) -> RunResult:
-        self.stop_event.clear()
+        try:
+            return self._run(script, sn, trace_path)
+        finally:
+            self.stop_event.clear()
+
+    def _run(self, script: Script, sn: str, trace_path: str | Path | None) -> RunResult:
         self.extensions = ExtensionLoader(
             self.extensions_dir, self.config.extensions_allowed)
+        extension_errors: list[ScriptError] = []
+        for stmt in script.statements:
+            if self._check_stop():
+                break
+            if isinstance(stmt, Step):
+                for instr in stmt.instructions:
+                    if isinstance(instr, Action):
+                        try:
+                            self.extensions.load(instr.handler)
+                        except ExtensionError as exc:
+                            extension_errors.append(ScriptError(exc.message, "E202", instr.line))
+        if extension_errors:
+            raise ScriptParseErrors(extension_errors)
 
         ctx = RunContext(sn=sn, station_id=self.config.station_id,
-                         logger=_get_logger(self.listener),
+                         logger=self.logger or _get_logger(self.listener),
                          script_dir=Path(script.path).parent if script.path
                          else self.config.base_dir)
-        self.trace = TraceLogger(trace_path) if trace_path else None
-
         start_time = now_iso()
         meta = RunMeta(
             sn=sn, script_name=script.name, script_version=script.version,
-            script_sha256=script.sha256, software_version=__version__,
+            script_sha256=script.sha256, software_version=self.config.software_version,
             station_id=self.config.station_id, start_time=start_time,
             script_path=script.path)
         handle = self.store.create_run(meta)
-        items: list[ItemResult] = []
         seq = 0
-
-        self.listener.on_run_start(ctx, script)
-        ctx.logger.info(f"[RUN] sn={sn} script={script.name} v{script.version} started")
 
         final_result = "PASS"
         aborted = False
 
         try:
+            self.trace = TraceLogger(trace_path) if trace_path else None
+            self.listener.on_run_start(ctx, script)
+            ctx.logger.info(f"[RUN] sn={sn} script={script.name} v{script.version} started")
             for stmt in script.statements:
                 if self._check_stop():
                     aborted = True
                     break
 
                 if isinstance(stmt, ConnectStmt):
-                    try:
-                        self._do_connect(ctx, stmt)
-                    except CommunicationError as exc:
-                        # 资源打开失败属链路异常 E302，记录日志并终止 Run
-                        ctx.logger.error(f"[{stmt.resource}] 打开失败 {exc.code}: {exc.message}")
-                        final_result = "ERROR"
-                        break
+                    self._do_connect(ctx, stmt)
                 elif isinstance(stmt, DisconnectStmt):
                     self._do_disconnect(ctx, stmt)
                 elif isinstance(stmt, DelayStmt):
@@ -217,7 +223,6 @@ class Engine:
                 elif isinstance(stmt, Step):
                     seq += 1
                     item = self._run_step(ctx, stmt, seq)
-                    items.append(item)
                     self.store.append_item(handle, item)
                     self.listener.on_step_finish(stmt, item)
 
@@ -234,6 +239,12 @@ class Engine:
                             ctx.logger.warning(
                                 f"[STEP] {stmt.name} FAIL（abort），终止测试")
                             break
+        except RuntimeAteError as exc:
+            ctx.logger.error(f"[RUN] {exc.code}: {exc.message}")
+            final_result = "ERROR"
+        except Exception:  # noqa: BLE001
+            ctx.logger.exception("[RUN] E303: 执行异常")
+            final_result = "ERROR"
         finally:
             # 无论正常/异常/中止，关闭所有资源
             for name, comm in list(ctx.resources.items()):
@@ -241,9 +252,16 @@ class Engine:
                     comm.close()
                     ctx.logger.info(f"[{name}] resource closed")
                 except Exception as exc:  # noqa: BLE001
-                    ctx.logger.error(f"[{name}] close 失败: {exc}")
+                    final_result = "ERROR"
+                    ctx.logger.error(f"[{name}] E302: 关闭资源失败: {exc}")
             if self.trace:
-                self.trace.close()
+                try:
+                    self.trace.close()
+                except OSError:
+                    final_result = "ERROR"
+                    ctx.logger.exception("[RUN] E303: 关闭逐帧日志失败")
+                finally:
+                    self.trace = None
 
         if aborted or self._check_stop():
             final_result = "ABORT"
@@ -257,16 +275,23 @@ class Engine:
     # ------------------------------------------------------------ 资源语句
     def _do_connect(self, ctx: RunContext, stmt: ConnectStmt) -> None:
         if stmt.resource in ctx.resources:
-            raise SimpleAteError(f"资源 {stmt.resource} 重复 connect")
-        comm = self._build_resource(stmt)
-        comm.open()
+            raise EngineBug(f"资源 {stmt.resource} 重复 connect")
+        try:
+            comm = self._build_resource(stmt)
+            comm.open()
+        except (CommunicationError, OSError, ValueError, TypeError) as exc:
+            raise CommunicationError(f"[{stmt.resource}] 打开失败: {exc}") from exc
         ctx.resources[stmt.resource] = comm
         ctx.logger.info(f"[{stmt.resource}] opened")
 
     def _do_disconnect(self, ctx: RunContext, stmt: DisconnectStmt) -> None:
-        comm = ctx.resources.pop(stmt.resource, None)
+        comm = ctx.resources.get(stmt.resource)
         if comm is not None:
-            comm.close()
+            try:
+                comm.close()
+            except Exception as exc:  # noqa: BLE001
+                raise CommunicationError(f"[{stmt.resource}] 关闭失败: {exc}") from exc
+            del ctx.resources[stmt.resource]
             ctx.logger.info(f"[{stmt.resource}] closed")
         else:
             ctx.logger.warning(f"[{stmt.resource}] disconnect 时资源未打开（忽略）")
@@ -282,16 +307,27 @@ class Engine:
     def _run_step(self, ctx: RunContext, step: Step, seq: int) -> ItemResult:
         attempts = step.retry + 1
         last_error: RuntimeAteError | None = None
+        retries = 0
         t0 = time.monotonic()
 
         for attempt in range(1, attempts + 1):
             if self._check_stop():
                 break
+            retries = attempt - 1
             self.listener.on_step_start(step, attempt)
             ctx.logger.info(f"[STEP] {step.name} start (attempt {attempt}/{attempts})")
             try:
                 value, unit = self._run_attempt(ctx, step)
+                if self._check_stop():
+                    raise TimeoutAteError("测试步被外部停止请求中断")
                 elapsed = time.monotonic() - t0
+                if step.limit is not None:
+                    display = step.limit.value
+                    if isinstance(display, VarRef):
+                        unit = ctx.variable_units.get(display.name)
+                    elif display is not None:
+                        unit = None
+                    unit = step.limit.unit or unit
 
                 # 人工判定：不重试，不按帧自动判定
                 if step.limit is not None and step.limit.mode == "manual":
@@ -299,12 +335,12 @@ class Engine:
                     if step.limit.value is not None:
                         judged_value = _jsonable(
                             resolve(step.limit.value, ctx.variables))
-                    unit = step.limit.unit or unit
                     request = ManualJudgeRequest(
                         seq=seq, step_name=step.name,
                         prompt=step.limit.prompt or step.name,
                         value=judged_value, unit=unit)
                     decision = self.listener.on_manual_judge(request)
+                    elapsed = time.monotonic() - t0
                     if decision is None:
                         self.stop_event.set()
                         return self._item(step, seq, judged_value, unit, "ERROR",
@@ -322,7 +358,6 @@ class Engine:
                 if step.limit is not None:
                     passed, judged = judge(step.limit, ctx.variables)
                     value = judged
-                    unit = step.limit.unit or unit
                     if not passed:
                         return self._item(step, seq, value, unit, "FAIL",
                                           elapsed, attempt - 1,
@@ -331,7 +366,7 @@ class Engine:
                                   elapsed, attempt - 1, message=None)
             except RuntimeAteError as exc:
                 last_error = exc
-                if not exc.retryable or attempt == attempts:
+                if self._check_stop() or not exc.retryable or attempt == attempts:
                     break
                 ctx.logger.warning(
                     f"[STEP] {step.name} {exc.code}（第 {attempt} 次尝试）：{exc.message}，重试")
@@ -343,11 +378,13 @@ class Engine:
                                   error_code="E303", message=f"未预期异常: {exc}")
 
         # 重试用尽 / 不可重试的运行期错误
-        code = getattr(last_error, "code", "E303")
-        message = getattr(last_error, "message", str(last_error))
+        if last_error is None:
+            last_error = TimeoutAteError("测试步被外部停止请求中断")
+        code = last_error.code
+        message = last_error.message
         ctx.logger.error(f"[STEP] {step.name} -> ERROR {code}: {message}")
         return self._item(step, seq, None, None, "ERROR",
-                          time.monotonic() - t0, step.retry,
+                          time.monotonic() - t0, retries,
                           error_code=code, message=message)
 
     def _run_attempt(self, ctx: RunContext, step: Step):
@@ -358,13 +395,17 @@ class Engine:
         # drain 语义：wait 的 drain="before"（默认）表示在与之配对的 send 之前清空残留帧。
         # 前向扫描：若下一个 wait 需要 drain，则在本条 send 前清空。
         instrs = step.instructions
+        previous = None
         for idx, instr in enumerate(instrs):
             if self._check_stop():
                 break
             if isinstance(instr, Send):
-                nxt = instrs[idx + 1] if idx + 1 < len(instrs) else None
+                ahead = idx + 1
+                while ahead < len(instrs) and isinstance(instrs[ahead], DelayStmt):
+                    ahead += 1
+                nxt = instrs[ahead] if ahead < len(instrs) else None
                 if isinstance(nxt, Wait) and nxt.drain == "before":
-                    frame_io.drain(comm)
+                    frame_io.drain(comm, self._check_stop, step.timeout)
                 if instr.mode == "file":
                     for frame in frame_io.iter_send_file(
                             instr, comm, ctx.script_dir, self._check_stop):
@@ -373,9 +414,8 @@ class Engine:
                     self._emit_tx(ctx, comm, do_send(instr, comm, ctx.variables))
             elif isinstance(instr, Wait):
                 # 独立 wait（前面没有配对 send）：在等待开始时按 drain 处理
-                prev = instrs[idx - 1] if idx > 0 else None
-                if not isinstance(prev, Send) and instr.drain == "before":
-                    frame_io.drain(comm)
+                if not isinstance(previous, Send) and instr.drain == "before":
+                    frame_io.drain(comm, self._check_stop, step.timeout)
                 if instr.mode == "file":
                     stats = frame_io.do_wait_file(
                         instr, comm, ctx.variables, ctx.script_dir, step.timeout,
@@ -387,12 +427,12 @@ class Engine:
                         f"[RX][{comm.name}] file {stats.bytes_received} bytes / "
                         f"{stats.chunks} chunks -> {stats.path}")
                 else:
-                    frame, extracted = do_wait(instr, comm, ctx.variables,
-                                               default_timeout=step.timeout,
-                                               should_cancel=self._check_stop)
-                    self._emit_rx(ctx, comm, frame)
-                    ctx.logger.info(f"[RX][{comm.name}] {frame} fields={extracted}")
+                    _, extracted = do_wait(instr, comm, ctx.variables,
+                                           default_timeout=step.timeout,
+                                           should_cancel=self._check_stop,
+                                           on_frame=lambda fr: self._emit_rx(ctx, comm, fr))
                     if extracted:
+                        ctx.variable_units.update({fld.var: fld.unit for fld in instr.fields})
                         # 取本 wait 最后一个字段作为 step 测量值候选
                         last_field = instr.fields[-1]
                         value = extracted[last_field.var]
@@ -401,6 +441,9 @@ class Engine:
                 self._interruptible_sleep(instr.ms / 1000.0)
             elif isinstance(instr, Action):
                 value = self._run_action(ctx, comm, instr)
+                unit = None
+            if not isinstance(instr, DelayStmt):
+                previous = instr
 
         return value, unit
 
@@ -428,6 +471,7 @@ class Engine:
             raise ExtensionError(f"扩展 {instr.handler} 抛出异常: {exc}") from exc
         if instr.var:
             ctx.variables[instr.var] = ret
+            ctx.variable_units.pop(instr.var, None)
         return ret
 
     @staticmethod
@@ -447,8 +491,8 @@ class Engine:
 
 
 def _jsonable(value: Any) -> Any:
-    if isinstance(value, bool):
-        return value
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
     if isinstance(value, (int, float, str)) or value is None:
         return value
     return str(value)
@@ -456,7 +500,6 @@ def _jsonable(value: Any) -> Any:
 
 def _get_logger(listener: EngineListener):
     """从 listener 上取 logger（CLI 注入），没有则用标准 logger。"""
-    import logging
     found = getattr(listener, "logger", None)
     if found is not None:
         return found

@@ -26,7 +26,7 @@
 
 其他说明：
 
-- 累计 158 个单元测试（解析 / 执行 / 帧判定 / 扩展 / 存储 / 文件传输与 Modbus / 串口 Mock 共 129 个，UI 与脚本编辑器 29 个），开发环境全部通过；
+- 回归测试覆盖解析、执行、帧判定、扩展、存储、文件传输、Modbus、串口 Mock、GUI 和脚本编辑器；
 - 脚本连接支持 CAN / 串口 / USB CDC / Modbus（脚本 `<connect>` 内联或工位配置）；支持人工判定与文件分块传输；
 - 进程退出码约定：`PASS=0`、`FAIL=1`、`ERROR=2`、`ABORT=3`；
 - 明确的非目标：不做通用 DSL / 表达式引擎、不内置数据库与 ORM、不内置具体 MES 协议、
@@ -60,17 +60,12 @@ pip install -e .[gui]
 pip install -e .[serial]
 ```
 
-或者不安装，直接把源码目录加入 `PYTHONPATH`：
-
-```bat
-set PYTHONPATH=源码目录
-```
-
 ### 3. 工位配置
 
 复制并按需修改 `config/station.toml`：工位号、SN 校验规则与扫码自动启动、
 结果/日志目录、通信资源（M1 用 `type = "mock"`，M3 真机改为 `type = "can"`
 并填写 interface / channel / bitrate）、扩展 action 白名单等均在该文件中配置。
+CLI 与 GUI 共用 SN 校验规则。发生断电或进程异常退出时，启动检查会把遗留的未完成结果标记为 ABORT。
 
 ---
 
@@ -141,11 +136,12 @@ python -m unittest discover -s tests -v
 | `tests/test_frame_judge.py` | 拼帧、ID/mask 匹配、字段提取、limit 判定 |
 | `tests/test_extension.py` | `<action handler="module:func">` 白名单加载 |
 | `tests/test_storage.py` | JSON 结果保存与 Outbox 目录 |
+| `tests/test_file_transfer.py` | 分块收发、完整性检查与原子落盘 |
 | `tests/test_ui.py` | 主窗口、引擎桥接、信号刷新 |
 | `tests/test_script_editor.py` | 脚本编辑器双向同步 / 增删移节点 / 校验拦截 |
 | `tests/test_serial_communication.py` | 串口 Mock、分帧/超时、USB 找口、Modbus RTU/ASCII/TCP 模拟 |
 
-> 若未安装 PySide6，UI 相关 25 个测试会被**自动跳过（skipped）**而非报错，
+> 若未安装 PySide6，UI 相关测试会被**自动跳过（skipped）**，
 > 安装 `pip install -e .[gui]` 后即自动执行，不影响引擎部分测试。
 
 也可用 Mock 应答做一次端到端手工验证：先执行上文“无头模式跑一次测试”，
@@ -202,7 +198,6 @@ Simple_ATE/
 
 - `data/results/uploaded/*.json`：每步即时保存的完整 Run 结果
   （MES 禁用时直接归档 uploaded；启用时先入 outbox，M4 实现上传）；
-- `data/results/{failed,pending}/`：FAIL / 待传 MES 的结果归档；
-- `data/logs/run_*.log`：运行日志；
-- `data/logs/trace/trace_*.log`：逐帧 CAN trace（TX/RX、ID、ext、data），
-  保留天数由 `storage.trace_retain_days` 控制。
+- `data/results/pending/` 保存待传 MES 的结果，`failed/` 预留给 M4 的上传失败归档；
+- `data/logs/run_*.log` 保存 CLI 和 GUI 的运行日志；
+- `data/logs/trace/trace_*.log` 保存逐帧通信记录（TX/RX、ID、ext、data）。当前版本保留生成的 trace，`storage.trace_retain_days` 为预留配置。

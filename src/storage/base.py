@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from ..engine.model import ItemResult
+if TYPE_CHECKING:
+    from ..engine.model import ItemResult
 
 
 @dataclass
@@ -22,7 +23,7 @@ class RunMeta:
 
 @dataclass
 class RunHandle:
-    """一次 Run 的存储句柄（文件存储中即文件路径）。"""
+    """一次 Run 的存储句柄。token 由具体存储实现管理。"""
 
     token: Any
     path: str = ""

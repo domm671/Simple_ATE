@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import math
+
 from ..errors import JudgeTypeError
 from .model import Limit, VarRef
 
 
 def resolve(operand, variables: dict):
     if isinstance(operand, VarRef):
-        return variables.get(operand.name)
+        try:
+            return variables[operand.name]
+        except KeyError as exc:
+            raise JudgeTypeError(f"变量 ${{{operand.name}}} 未产出") from exc
     return operand
 
 
-def _as_number(value, what: str):
+def _as_number(value, what: str) -> int | float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise JudgeTypeError(f"{what} = {value!r} 不是数值，无法做数值判定")
-    return float(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        raise JudgeTypeError(f"{what} = {value!r} 不是有限数值")
+    return value
 
 
 def judge(spec: Limit, variables: dict) -> tuple[bool, object]:
@@ -34,6 +41,9 @@ def judge(spec: Limit, variables: dict) -> tuple[bool, object]:
             raise JudgeTypeError(
                 f"eq 判定类型不相容：value={value!r}({type(value).__name__}), "
                 f"eq={expected!r}({type(expected).__name__})")
+        for operand in (value, expected):
+            if isinstance(operand, float):
+                _as_number(operand, "eq")
         return value == expected, value
 
     if value is None:

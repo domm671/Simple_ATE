@@ -1,10 +1,13 @@
 """文件结果存储测试：同 SN 多 Run 不覆盖、增量保存、崩溃恢复。"""
 
 import json
+import subprocess
+import sys
 import tempfile
-import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from simple_ate.engine.model import ItemResult
 from simple_ate.storage.base import RunMeta
@@ -26,6 +29,13 @@ class TestFileStore(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
 
+    def test_storage_can_be_imported_before_engine(self):
+        result = subprocess.run(
+            [sys.executable, "-c", "from simple_ate.storage.file_store import FileResultStore"],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_mes_disabled_goes_uploaded(self):
         store = FileResultStore(self.tmp, mes_enabled=False)
         h = store.create_run(meta())
@@ -42,15 +52,25 @@ class TestFileStore(unittest.TestCase):
         self.assertEqual(len(list((self.tmp / PENDING).glob("*.json"))), 1)
 
     def test_same_sn_multiple_runs_no_overwrite(self):
-        store = FileResultStore(self.tmp, mes_enabled=False)
-        paths = []
-        for _ in range(3):
+        def run(_):
+            store = FileResultStore(self.tmp)
             h = store.create_run(meta("SNX"))
             store.finish_run(h, "PASS", "t")
-            paths.append(h.path)
-            time.sleep(1.05)          # 时间戳精确到秒，确保文件名不同
+            return h.path
+
+        with patch("simple_ate.storage.file_store._stamp", return_value="20260101_090000"):
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                paths = list(pool.map(run, range(3)))
         self.assertEqual(len(set(paths)), 3)
         self.assertEqual(len(list((self.tmp / UPLOADED).glob("SNX_*.json"))), 3)
+
+    def test_sn_is_kept_in_json_but_cannot_change_output_directory(self):
+        store = FileResultStore(self.tmp)
+        sn = r"..\..\DUT/01?"
+        handle = store.create_run(meta(sn))
+        result = store.finish_run(handle, "PASS", "t1")
+        self.assertEqual(Path(handle.path).parent, self.tmp / UPLOADED)
+        self.assertEqual(result.meta.sn, sn)
 
     def test_incremental_persist_each_item(self):
         store = FileResultStore(self.tmp, mes_enabled=False)
@@ -72,13 +92,25 @@ class TestFileStore(unittest.TestCase):
         # 手动制造一个没有 result 的残留文件
         h = store.create_run(meta("CRASH"))
         store.append_item(h, item())
-        # 不调用 finish_run -> result 为 None
-        n = store.recover_aborted()
+        # 另一个进程启动时不能把正在执行的 Run 当成崩溃残留。
+        other = FileResultStore(self.tmp)
+        self.assertEqual(other.recover_aborted(), 0)
+        h.token.close()  # 模拟进程退出释放文件锁，但结论仍为 None
+        n = other.recover_aborted()
         self.assertEqual(n, 1)
         doc = json.loads(Path(h.path).read_text(encoding="utf-8"))
         self.assertEqual(doc["result"], "ABORT")
         # 再扫一次不应重复处理
         self.assertEqual(store.recover_aborted(), 0)
+
+    def test_recovery_skips_invalid_json_and_reads_legacy_results(self):
+        store = FileResultStore(self.tmp)
+        directory = self.tmp / UPLOADED
+        (directory / "invalid.json").write_text("[]", encoding="utf-8")
+        legacy = directory / "legacy.json"
+        legacy.write_text('{"sn":"LEGACY","items":[]}', encoding="utf-8")
+        self.assertEqual(store.recover_aborted(), 1)
+        self.assertEqual(json.loads(legacy.read_text(encoding="utf-8"))["result"], "ABORT")
 
 
 if __name__ == "__main__":

@@ -23,9 +23,8 @@
 
 ### 3.1 setup_run_logger(log_dir)
 
-- 创建日志目录，生成文件 `run_<yyyyMMdd_HHmmss>.log`；
-- 配置名为 `simple_ate` 的 logger：同时输出到文件（UTF-8）与控制台，
-  格式 `时间 LEVEL 消息`；清空已有 handler、关闭 propagate，避免重复打印；
+- 创建日志目录，生成文件 `run_<yyyyMMdd_HHmmss>_<唯一后缀>.log`；
+- 每次调用创建独立的 logger。CLI 写入文件（UTF-8）与控制台，GUI 写入文件并经信号更新运行日志区；
 - 返回 `(logger, log_path)`。
 
 典型内容：
@@ -37,7 +36,7 @@
 
 ### 3.2 TraceLogger(trace_path)
 
-- 以写模式打开 `trace_<SN>_<时间戳>.log`（路径由 CLI/GUI 在 Run 开始前确定，
+- 独占创建 `trace_<SN>_<时间戳>_<唯一后缀>.log`（路径由 CLI/GUI 在 Run 开始前确定，
   位于 `<log_dir>/trace/`）；
 - `tx(resource, frame)` / `rx(resource, frame)`：逐帧写入，每行立即 flush；
 - `note(text)`：写入备注行；
@@ -52,8 +51,7 @@
 
 ## 4. 与其他模块的关系
 
-- 引擎内部日志走 `ctx.logger`（CLI 注入的即 `setup_run_logger` 产物），
-  不直接 print；
+- 引擎内部日志走 `ctx.logger`，Run 结束后 CLI 和 GUI 释放日志文件句柄；
 - 引擎在每次 send/recv 后调用 `TraceLogger.tx/rx`，并同时经
   `on_trace` 事件通知监听方（GUI 默认不显示 trace，只写文件）；
 - trace 文件与 run log 均**不进入**结果存储。
@@ -62,4 +60,4 @@
 
 - 运行日志：`data/logs/run_*.log`；
 - 通信 trace：`data/logs/trace/trace_*.log`；
-- trace 保留天数由 `station.toml` 的 `storage.trace_retain_days` 控制。
+- `storage.trace_retain_days` 为预留配置，当前版本保留生成的 trace。

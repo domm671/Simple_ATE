@@ -1,14 +1,9 @@
-"""通信层抽象接口（同步模型）。
-
-v0.1 只实现 CAN 与 Mock；serial 仅占位。
-"""
+"""通信层抽象接口（同步模型）。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Protocol
-
-from ..errors import TimeoutAteError  # noqa: F401  （供实现类统一引用）
 
 
 @dataclass(frozen=True)
