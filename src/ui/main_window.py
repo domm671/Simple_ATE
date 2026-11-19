@@ -70,7 +70,8 @@ class MainWindow(QMainWindow):
         self._closing = False
         self._manual_dialog: QMessageBox | None = None
 
-        self.setWindowTitle(f"simple_ATE 终测工位 — {config.station_id}")
+        mode_label = "生产模式" if config.is_production else "调试模式"
+        self.setWindowTitle(f"simple_ATE 终测工位 — {config.station_id}（{mode_label}）")
         self.resize(980, 760)
 
         self._build_ui()

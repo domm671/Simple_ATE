@@ -4,9 +4,9 @@
   协议：扩展帧自定义 CAN，请求 0x18FF50E5 / 应答 0x18FF50E6
   变更：1.0 初版
 -->
-<test name="BMS_FT" version="1.0">
+<test name="BMS_FT" version="1.1">
 
-    <connect resource="can_main" timeout="3"/>
+    <connect resource="can_main"/>
 
     <!-- 通信自检 -->
     <step name="CAN_COMM" timeout="2" retry="2" retry_interval="0.1" on_fail="abort">

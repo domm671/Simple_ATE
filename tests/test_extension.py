@@ -26,6 +26,16 @@ def boom(ctx, resource):
 
 def comm_fail(ctx, resource):
     raise TimeoutAteError("ext timeout")
+
+
+def scoped(ctx, resource, value, retry_once="false"):
+    assert not ctx.variables and not ctx.variable_units, "变量或单位从上次执行泄漏"
+    if retry_once == "true" and not getattr(resource, "retried", False):
+        resource.retried = True
+        ctx.variables["answer"] = 99
+        ctx.variable_units["answer"] = "V"
+        raise TimeoutAteError("首次采集超时")
+    return int(value)
 '''
 
 XML = """<test name="T" version="1.0">
@@ -74,6 +84,20 @@ class TestExtension(unittest.TestCase):
         r = self._engine(XML)
         self.assertEqual(r.result, "PASS")
         self.assertEqual(r.items[0].value, 42)
+
+    def test_each_step_and_retry_start_with_empty_variables(self):
+        result = self._engine('''<test name="T" version="1.0"><connect resource="can"/>
+          <step name="A" retry="1">
+            <action handler="myext:scoped" value="10" retry_once="true" var="answer"/>
+            <action handler="myext:echo" value="${answer}" var="answer"/>
+            <limit value="${answer}" eq="11"/>
+          </step>
+          <step name="B">
+            <action handler="myext:scoped" value="20" var="answer"/>
+            <limit value="${answer}" eq="20"/>
+          </step></test>''')
+        self.assertEqual(result.result, "PASS")
+        self.assertEqual([(item.value, item.retries) for item in result.items], [(11, 1), (20, 0)])
 
     def test_missing_handler_rejected_before_run_creation(self):
         with self.assertRaises(ScriptParseErrors) as error:

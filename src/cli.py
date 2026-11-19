@@ -61,15 +61,11 @@ def _cmd_run(args) -> int:
     result_dir = cfg.resolve_path(cfg.storage.result_dir)
 
     script_path = Path(args.script)
-    parser = ScriptParser(
-        station_resources=cfg.resource_names(),
-        allowed_extensions=set(cfg.extensions_allowed),
-        station_protocols={name: spec.type
-                           for name, spec in cfg.resources.items()})
-    script = parser.parse_file(str(script_path))
+    script = ScriptParser(station=cfg).parse_file(str(script_path))
 
     with run_logging(log_dir) as (logger, log_path):
-        logger.info(f"simple_ATE {cfg.software_version} | station={cfg.station_id} | log={log_path}")
+        logger.info(f"simple_ATE {cfg.software_version} | station={cfg.station_id} "
+                    f"| mode={cfg.mode} | log={log_path}")
         store = FileResultStore(result_dir, mes_enabled=cfg.mes.enabled)
         recovered = store.recover_aborted()
         if recovered:

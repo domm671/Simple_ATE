@@ -15,6 +15,7 @@ class RunContext:
     sn: str
     station_id: str
     logger: logging.Logger
+    # 执行器在每次 Attempt 开始时重建变量表，结束时清空。
     variables: dict[str, Any] = field(default_factory=dict)
     resources: dict[str, Communication] = field(default_factory=dict)
     # 脚本所在目录：文件传输的相对路径以此为基准

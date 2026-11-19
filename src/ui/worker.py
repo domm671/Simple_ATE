@@ -47,12 +47,7 @@ class _Runner(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            parser = ScriptParser(
-                station_resources=self.config.resource_names(),
-                allowed_extensions=set(self.config.extensions_allowed),
-                station_protocols={name: spec.type
-                                   for name, spec in self.config.resources.items()})
-            script = parser.parse_file(self.script_path)
+            script = ScriptParser(station=self.config).parse_file(self.script_path)
 
             with run_logging(self.log_dir, console=False) as (logger, log_path):
                 logger.addHandler(_BridgeLogHandler(self.bridge))

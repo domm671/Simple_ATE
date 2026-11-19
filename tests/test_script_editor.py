@@ -376,7 +376,8 @@ class TestNewAttributes(unittest.TestCase):
             '<send id="0" mode="file" file="fw.bin" chunk_size="256" '
             'seq_len="2"/>'
             '<wait id="0" mode="file" file="out.bin" chunk_size="256" '
-            'seq_len="2" size="1024" checksum="crc32"/>'
+            'seq_len="2" size="1024" checksum="crc32" checksum_value="26 39 F4 CB" '
+            'match_data="AA 01" match_offset="1"/>'
             '</step></test>')
         cfg = load_config(CONFIG)
         dlg = ScriptEditorDialog(cfg, path=None)
@@ -395,6 +396,18 @@ class TestNewAttributes(unittest.TestCase):
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "未安装 PySide6，跳过脚本编辑器测试")
 class TestConnectDynamicFields(unittest.TestCase):
+    def test_production_editor_validates_station_binding(self):
+        cfg = load_config(CONFIG)
+        cfg.mode = "production"
+        cfg.resources["can_main"].type = "can"
+        cfg.resources["can_main"].options.pop("mock_script")
+        dlg = ScriptEditorDialog(cfg, path=SCRIPT)
+        xml = dlg._current_text()
+        self.assertEqual(dlg.validate_text(xml), "")
+        invalid = xml.replace('<connect resource="can_main"/>', '<connect resource="can_main" channel="test"/>')
+        self.assertIn("E211", dlg.validate_text(invalid))
+        dlg.deleteLater()
+
     def _select_connect(self, dlg):
         top = dlg.tree.topLevelItem(0)
         for i in range(top.childCount()):

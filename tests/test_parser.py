@@ -2,6 +2,8 @@
 
 import unittest
 
+from simple_ate.communication.base import ResourceConfig
+from simple_ate.config_loader import StationConfig
 from simple_ate.errors import ScriptParseErrors
 from simple_ate.engine.parser import ScriptParser
 
@@ -28,8 +30,11 @@ VALID = """<?xml version="1.0"?>
     </wait>
   </step>
   <step name="S2" timeout="2">
+    <send id="0x100" data="02"/>
+    <wait id="0x101">
+      <field var="ch" offset="0" raw="true"/>
+    </wait>
     <send id="0x100" data="01 ${ch}"/>
-    <wait id="0x101"/>
   </step>
 </test>
 """
@@ -40,6 +45,13 @@ class TestParserOK(unittest.TestCase):
         s = parse(VALID)
         self.assertEqual(s.name, "T")
         self.assertEqual(len(s.statements), 3)   # connect + 2 step
+
+    def test_production_protocol_requirement_and_user_version(self):
+        station = StationConfig(mode="production", resources={"can_main": ResourceConfig("can_main", "can")})
+        script = ScriptParser(station=station).parse_bytes(
+            VALID.replace('resource="can_main"', 'resource="can_main" protocol="can"')
+            .replace('version="1.0">', 'version="9.4.2">').encode())
+        self.assertEqual(script.version, "9.4.2")
 
     def test_ext_id(self):
         s = parse("""<test name="T" version="1.0">
@@ -58,6 +70,26 @@ class TestParserOK(unittest.TestCase):
 
 
 class TestParserErrors(unittest.TestCase):
+    def test_production_requires_test_step_and_station_binding(self):
+        station = StationConfig(mode="production", resources={
+            "can_main": ResourceConfig("can_main", "can"),
+            "mock_bus": ResourceConfig("mock_bus", "mock"),
+            "serial_bus": ResourceConfig("serial_bus", "serial", {"mock_script": "mock.json"}),
+        })
+        parser = ScriptParser(station=station)
+        for body, expected in (
+            ('<connect resource="can_main"/>', "E108"),
+            ('<connect resource="new" protocol="can"/>', "E204"),
+            ('<connect resource="can_main" protocol="serial"/>', "E211"),
+            ('<connect resource="can_main" timeout="3"/>', "E211"),
+            ('<connect resource="can_main" channel="PCAN_USBBUS2"/>', "E211"),
+            ('<connect resource="mock_bus"/>', "E211"),
+            ('<connect resource="serial_bus"/>', "E211"),
+        ):
+            with self.subTest(body=body), self.assertRaises(ScriptParseErrors) as cm:
+                parser.parse_bytes(f'<test name="T" version="1.0">{body}</test>'.encode())
+            self.assertIn(expected, codes(cm.exception))
+
     def test_empty_station_and_invalid_attributes_report_locations(self):
         parser = ScriptParser(station_resources=set(), allowed_extensions=set())
         xml = b'''<test name="T" version="1.0">
@@ -194,6 +226,22 @@ class TestParserErrors(unittest.TestCase):
               </test>""")
         self.assertIn("E208", codes(cm.exception))
 
+    def test_variables_from_previous_step_are_out_of_scope(self):
+        for instructions in (
+            '<send id="1" data="${prev}"/>',
+            '<action handler="sample_ext:read_status" address="${prev}"/>',
+            '<wait id="1" mode="file" file="log.bin" size="1" '
+            'checksum="sum8" checksum_value="${prev}"/>',
+            '<send id="1"/><limit value="${prev}" eq="1"/>',
+            '<send id="1"/><limit value="1" eq="${prev}"/>',
+        ):
+            with self.subTest(instructions=instructions), self.assertRaises(ScriptParseErrors) as cm:
+                parse('<test name="T" version="1.0"><connect resource="can_main"/>'
+                      '<step name="Read"><wait id="1"><field var="prev" offset="0" raw="true"/>'
+                      '</wait></step>'
+                      f'<step name="Use">{instructions}</step></test>')
+            self.assertEqual(codes(cm.exception), {"E208"})
+
     def test_multi_resource_requires_step_resource(self):
         with self.assertRaises(ScriptParseErrors) as cm:
             parse("""<test name="T" version="1.0">
@@ -235,6 +283,14 @@ class TestParserErrors(unittest.TestCase):
 
 
 class TestProtocolExtensions(unittest.TestCase):
+    def test_wait_rejects_incomplete_or_out_of_bounds_payload_match(self):
+        for attrs in ('match_offset="1"', 'match_data="GG"', 'match_data=""',
+                      'match_data="AB CD" match_offset="7"'):
+            with self.subTest(attrs=attrs), self.assertRaises(ScriptParseErrors) as cm:
+                parse('<test name="T" version="1.0"><connect resource="can_main"/>'
+                      f'<step name="S"><wait id="1" {attrs}/></step></test>')
+            self.assertIn("E105", codes(cm.exception))
+
     def test_serial_field_supports_offsets_beyond_can_and_signed_calibration(self):
         script = parse('''<test name="T" version="1.0">
           <connect resource="serial" protocol="serial" port="COM1"/>
@@ -375,7 +431,7 @@ class TestProtocolExtensions(unittest.TestCase):
                   '<connect resource="can_main"/>'
                   '<step name="S"><wait id="0x1" mode="file" '
                   'file="recv.bin" size="100" chunk_size="8" '
-                  'checksum="crc32"/></step></test>')
+                  'checksum="crc32" checksum_value="26 39 F4 CB"/></step></test>')
         wait = s.statements[1].instructions[0]
         self.assertEqual(wait.mode, "file")
         self.assertEqual(wait.size, 100)
@@ -388,6 +444,15 @@ class TestProtocolExtensions(unittest.TestCase):
                   '<step name="S"><wait id="0x1" mode="file" '
                   'file="recv.bin"/></step></test>')
         self.assertIn("E122", codes(cm.exception))
+
+    def test_wait_file_rejects_conflicting_termination_or_incomplete_checksum(self):
+        for attrs in ('size="1" chunks="2"', 'size="1" checksum="crc32"',
+                      'size="1" checksum="crc32" checksum_value="AA"'):
+            with self.subTest(attrs=attrs), self.assertRaises(ScriptParseErrors) as cm:
+                parse('<test name="T" version="1.0"><connect resource="can_main"/>'
+                      f'<step name="S"><wait id="1" mode="file" file="r.bin" {attrs}/>'
+                      '</step></test>')
+            self.assertIn("E122", codes(cm.exception))
 
     def test_wait_file_rejects_fields(self):
         with self.assertRaises(ScriptParseErrors) as cm:

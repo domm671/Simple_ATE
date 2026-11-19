@@ -67,6 +67,13 @@ pip install -e .[serial]
 并填写 interface / channel / bitrate）、扩展 action 白名单等均在该文件中配置。
 CLI 与 GUI 共用 SN 校验规则。发生断电或进程异常退出时，启动检查会把遗留的未完成结果标记为 ABORT。
 
+- `mode = "debug"`（缺省）：支持 Mock 和脚本内联连接参数，仓库示例工位使用此模式。
+- `mode = "production"`：工位配置负责绑定真实设备。脚本 `<connect>` 只声明 `resource` 和可选 `protocol`，至少需要一个可执行测试步。由样例切换到真实 CAN 时，将资源 `type` 改为 `can`、填写接口与通道并移除该资源的 `mock_script`。
+
+`<test version>` 是产品脚本的版本号。固定字节应答匹配和文件接收配置示例见 [ATE 脚本格式规范](./ATE脚本格式规范.md)。文件接收从 `size`、`chunks`、`idle_gap` 中选一个终止条件，启用校验时须填写 `checksum_value`。
+
+脚本变量在同一工步内按定义顺序使用。每次尝试（包括重试）都从空变量表开始。脚本如有跨步引用，加载时报 E208，可将采集与引用放入同一工步。
+
 ---
 
 ## 运行
@@ -198,6 +205,7 @@ Simple_ATE/
 
 - `data/results/uploaded/*.json`：每步即时保存的完整 Run 结果
   （MES 禁用时直接归档 uploaded；启用时先入 outbox，M4 实现上传）；
+- 新结果附带 `run_id`、计划与已记录步数、终止原因、工位模式、工位配置 SHA-256 和各连接对应的通信后端。复测会产生新的 `run_id`，同一份结果可用其 `run_id` 作为 MES 重传去重键；
 - `data/results/pending/` 保存待传 MES 的结果，`failed/` 预留给 M4 的上传失败归档；
 - `data/logs/run_*.log` 保存 CLI 和 GUI 的运行日志；
 - `data/logs/trace/trace_*.log` 保存逐帧通信记录（TX/RX、ID、ext、data）。当前版本保留生成的 trace，`storage.trace_retain_days` 为预留配置。

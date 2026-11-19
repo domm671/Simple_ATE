@@ -62,7 +62,7 @@ TAG_CN = {
 ATTR_SPEC: dict[str, list[tuple[str, str, str, bool]]] = {
     "test": [
         ("name", "脚本名称", "str", True),
-        ("version", "版本（如 1.0）", "str", True),
+        ("version", "产品脚本版本（如 1.0）", "str", True),
     ],
     "connect": [
         ("resource", "逻辑资源名", "str", True),
@@ -122,6 +122,8 @@ ATTR_SPEC: dict[str, list[tuple[str, str, str, bool]]] = {
         ("timeout", "本次等待超时（秒）", "float", False),
         ("drain", "缓冲清空方式", "drain", False),
         ("min_len", "应答最小数据长度", "int", False),
+        ("match_data", "应答匹配字节（如 02 01）", "str", False),
+        ("match_offset", "匹配起始偏移（从 0 开始）", "int", False),
         ("mode", "接收模式", "receivemode", False),
         ("file", "接收保存路径（相对脚本目录）", "str", False),
         ("chunk_size", "每帧有效数据字节数", "int", False),
@@ -791,6 +793,11 @@ class ScriptEditorDialog(QDialog):
         return spec.type if spec is not None else ""
 
     def _connect_visible_attrs(self, proto: str) -> set[str]:
+        if self.config.is_production:
+            attrs = {"resource", "protocol"}
+            if self._connect_el is not None:
+                attrs.update(self._connect_el.attrib)
+            return attrs
         attrs = set(CONNECT_COMMON_ATTRS)
         if proto == "modbus":
             mode_widget = self._form_widgets.get("modbus_mode")
@@ -813,7 +820,9 @@ class ScriptEditorDialog(QDialog):
         for attr, widget in self._form_widgets.items():
             self._form_layout.setRowVisible(widget, attr in visible)
         if self._connect_hint is not None:
-            if not proto:
+            if self.config.is_production:
+                self._connect_hint.setText("生产模式由工位配置绑定设备。脚本只填写逻辑资源名及可选的协议要求。")
+            elif not proto:
                 self._connect_hint.setText(
                     "未指定协议：将使用工位配置中该资源的 type；"
                     "选择 protocol 后仅显示该协议的相关参数。")
@@ -849,11 +858,7 @@ class ScriptEditorDialog(QDialog):
 
     def validate_text(self, text: str) -> str:
         """用正式解析器做静态校验，返回错误信息文本（空串表示通过）。"""
-        parser = ScriptParser(
-            station_resources=self.config.resource_names(),
-            allowed_extensions=set(self.config.extensions_allowed),
-            station_protocols={name: spec.type
-                               for name, spec in self.config.resources.items()})
+        parser = ScriptParser(station=self.config)
         try:
             parser.parse_bytes(text.encode("utf-8"), source_path=str(self.path or ""))
         except ScriptParseErrors as exc:
@@ -868,7 +873,7 @@ class ScriptEditorDialog(QDialog):
         if msg:
             self.error_view.setPlainText(msg)
             return False
-        self.error_view.setPlainText("✔ 校验通过：脚本符合 Script XML v1 规范。")
+        self.error_view.setPlainText("✔ 脚本校验通过。")
         return True
 
     def _on_save(self) -> None:

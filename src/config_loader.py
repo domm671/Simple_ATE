@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 
 from .communication.base import ResourceConfig
+from .errors import ScriptError
+
+
+_HARDWARE_PROTOCOLS = {"can", "serial", "usb", "modbus"}
 
 
 @dataclass
@@ -62,6 +67,31 @@ class StationConfig:
     extensions_allowed: tuple[str, ...] = ()
     extensions_dir: str = "extensions"
     base_dir: Path = Path(".")
+    mode: str = "debug"
+    config_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("debug", "production"):
+            raise ValueError('工位 mode 必须为 "debug" 或 "production"')
+
+    @property
+    def is_production(self) -> bool:
+        return self.mode == "production"
+
+    def check_connection(self, resource: str, protocol: str | None,
+                         inline_parameters: bool) -> None:
+        """生产脚本声明协议要求，设备与后端由工位配置决定。"""
+        if not self.is_production:
+            return
+        spec = self.resources.get(resource)
+        if spec is None:
+            raise ScriptError(f"生产资源 {resource!r} 未在工位配置中定义", "E204")
+        if inline_parameters:
+            raise ScriptError("生产脚本的 connect 只允许 resource 和 protocol", "E211")
+        if spec.type not in _HARDWARE_PROTOCOLS or spec.options.get("mock_script"):
+            raise ScriptError(f"生产资源 {resource!r} 必须绑定真实通信后端", "E211")
+        if protocol is not None and protocol != spec.type:
+            raise ScriptError(f"资源 {resource!r} 要求协议 {protocol}，工位配置为 {spec.type}", "E211")
 
     def resource_names(self) -> set[str]:
         return set(self.resources.keys())
@@ -72,13 +102,15 @@ class StationConfig:
 
 def load_config(path: str | Path) -> StationConfig:
     path = Path(path)
-    with open(path, "rb") as f:
-        raw = tomllib.load(f)
+    data = path.read_bytes()
+    raw = tomllib.loads(data.decode("utf-8"))
 
     cfg = StationConfig(
         station_id=raw.get("station_id", "UNKNOWN"),
         software_version=raw.get("software_version", "0.1.0"),
         base_dir=path.parent.resolve(),
+        mode=raw.get("mode", "debug"),
+        config_sha256=hashlib.sha256(data).hexdigest(),
     )
 
     if "sn" in raw:

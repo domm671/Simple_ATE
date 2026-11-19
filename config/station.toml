@@ -1,5 +1,6 @@
 # simple_ATE 工位配置（示例）
 station_id = "FT_LINE1_ST03"
+mode = "debug"  # 生产工位改为 "production"，并为脚本引用的资源配置真实设备
 software_version = "0.1.0"
 
 [sn]

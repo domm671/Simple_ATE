@@ -82,7 +82,7 @@ Engine(config, store, listener, extensions_dir).run(script, sn, trace_path) -> R
 ### 4.3 Run 结论聚合
 
 任一步 **ERROR → Run=ERROR**（ERROR 优先于 FAIL，工装异常不计产品不良）；
-否则任一 FAIL → FAIL；全 PASS → PASS；人工停止 → ABORT（已有明细保留）。
+否则任一 FAIL → FAIL。计划中至少一步且所有计划步骤均已完成并通过时为 PASS。人工停止为 ABORT，保留已有明细。
 
 ### 4.4 停止机制
 
@@ -92,8 +92,7 @@ Engine(config, store, listener, extensions_dir).run(script, sn, trace_path) -> R
 
 ### 4.5 变量与扩展
 
-- 变量为 Run 级全局，存入 `ctx.variables`；`${name}` 仅简单取值，无表达式；
-  解析期做“定义先于引用”检查；
+- `ctx.variables` 保存当前工步 Attempt 的变量。每次尝试从空表开始，退出时清空变量和工程单位。解析期检查 `${name}` 在本工步内先定义后引用；
 - `<action handler="module:func">`：模块必须在工位配置
   `[extensions] allowed` 白名单内，否则 E201；`resolve_kwargs`
   把入参（含 `${var}`）统一转成字符串后调用
@@ -123,7 +122,7 @@ CLI（`simple_ate.cli.CliListener`）直接打印；GUI 由
 - **错误尽早暴露**：结构、类型、资源、变量、扩展白名单等全部在加载期校验，
   解析器一次收集全部错误而非遇错即停；
 - 资源类型（mock/can/serial/usb/modbus）默认由工位配置决定；
-  v2.1 起 `<connect>` 可用 `protocol` + 参数内联声明并覆盖工位配置，
+  调试模式的 `<connect>` 可内联连接参数。生产模式通过逻辑资源名引用工位绑定，
   以便单脚本自描述串口工位。
 
 ## 7. 相关测试

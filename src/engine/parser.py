@@ -15,7 +15,9 @@ import xml.etree.ElementTree as ET
 from xml.parsers import expat
 
 from ..communication.modbus import MAX_PDU
-from ..errors import ScriptError, ScriptParseErrors
+from ..config_loader import StationConfig
+from ..errors import FileTransferError, ScriptError, ScriptParseErrors
+from .frame_io import CHECKSUM_LENGTHS, normalize_checksum_value
 from .model import (
     Action,
     ConnectStmt,
@@ -47,7 +49,7 @@ PROTOCOLS = {"can", "serial", "modbus", "usb", "mock"}
 PARITIES = {"none", "even", "odd", "mark", "space"}
 FLOWCONTROLS = {"none", "xonxoff", "rtscts", "dsrdtr"}
 MODBUS_MODES = {"rtu", "ascii", "tcp"}
-CHECKSUMS = {"none", "crc32", "crc16_modbus", "sum8"}
+CHECKSUMS = {"none", *CHECKSUM_LENGTHS}
 TRANSFER_MODES = {"single", "file"}
 LIMIT_MODES = {"auto", "manual"}
 SEQ_LENGTHS = {0, 1, 2, 4}
@@ -84,6 +86,7 @@ ALLOWED_ATTRS: dict[str, set[str]] = {
     "send": {"id", "id_mask", "ext", "data",
              "mode", "file", "chunk_size", "seq_len", "header", "interval"},
     "wait": {"id", "id_mask", "ext", "timeout", "drain", "min_len",
+             "match_data", "match_offset",
              "mode", "file", "chunk_size", "seq_len", "header",
              "size", "chunks", "idle_gap", "max_size", "checksum", "checksum_value"},
     "field": {"var", "offset", "length", "endian", "gain", "bias", "raw", "unit"},
@@ -151,7 +154,13 @@ def _attr(el: ET.Element, name: str, default=None):
 class ScriptParser:
     def __init__(self, station_resources: set[str] | None = None,
                  allowed_extensions: set[str] | None = None,
-                 station_protocols: dict[str, str] | None = None):
+                 station_protocols: dict[str, str] | None = None, *,
+                 station: StationConfig | None = None):
+        self.station = station
+        if station is not None:
+            station_resources = station.resource_names()
+            allowed_extensions = set(station.extensions_allowed)
+            station_protocols = {name: spec.type for name, spec in station.resources.items()}
         self.station_resources = station_resources
         self.allowed_extensions = allowed_extensions
         # 工位配置中各资源的协议（type），脚本 <connect protocol> 可覆盖。
@@ -197,19 +206,18 @@ class ScriptParser:
         if not name or not _IDENT_RE.match(name or ""):
             errs.add("test 的 name 非法（需匹配 ^[A-Za-z0-9_-]+$）", "E105", root)
         if not _VERSION_RE.match(version or ""):
-            errs.add("test 的 version 非法，需形如 1.0 / 1.2.1", "E105", root)
+            errs.add("test 的产品脚本版本 version 须为两段或三段数字", "E105", root)
 
         statements: list = []
         step_names: set[str] = set()
         connected: set[str] = set()          # 当前位置之前已经 connect 的资源
         protocols: dict[str, str] = {}       # 资源 -> 生效协议（脚本 connect 覆盖工位配置）
-        defined_vars: set[str] = set()       # 当前位置之前已产出的变量
 
         for el in root:
             tag = el.tag
             if tag not in TOP_TAGS:
                 code = "E107" if tag in {"if", "loop", "call"} else "E102"
-                hint = "（v2 预留标签，v1 不支持）" if code == "E107" else ""
+                hint = "（预留标签）" if code == "E107" else ""
                 errs.add(f"顶层出现未知标签 <{tag}>{hint}", code, el)
                 continue
 
@@ -235,16 +243,13 @@ class ScriptParser:
             elif tag == "delay":
                 statements.append(self._parse_delay(el, errs))
             elif tag == "step":
-                step = self._parse_step(el, errs, connected, protocols, defined_vars, step_names)
+                step = self._parse_step(el, errs, connected, protocols, step_names)
                 if step:
                     statements.append(step)
-                    # 本 step 产出的 field/action 变量对后续 step 可见
-                    for instr in step.instructions:
-                        if isinstance(instr, Wait):
-                            defined_vars.update(f.var for f in instr.fields)
-                        elif isinstance(instr, Action) and instr.var:
-                            defined_vars.add(instr.var)
 
+        if self.station is not None and self.station.is_production:
+            if not any(isinstance(stmt, Step) and stmt.instructions for stmt in statements):
+                errs.add("生产脚本至少需要一个可执行测试步", "E108", root)
         errs.raise_if_any()
         return Script(name=name, version=version, sha256=sha,
                       statements=tuple(statements), path=source_path)
@@ -276,7 +281,13 @@ class ScriptParser:
                 protocol = None
         # 未指定 protocol 时资源必须在工位配置中定义；
         # 指定 protocol 时允许在脚本内联定义串口/Modbus/USB 资源。
-        if (resource and self.station_resources is not None
+        if resource.strip() and self.station is not None and self.station.is_production:
+            try:
+                inline_parameters = bool(el.attrib.keys() - {"resource", "protocol"})
+                self.station.check_connection(resource, protocol, inline_parameters)
+            except ScriptError as exc:
+                errs.add(exc.message, exc.code, el)
+        elif (resource and self.station_resources is not None
                 and resource not in self.station_resources and protocol is None):
             errs.add(
                 f"资源 {resource!r} 未在工位配置中定义"
@@ -342,8 +353,7 @@ class ScriptParser:
 
     # ------------------------------------------------------------ step
     def _parse_step(self, el: ET.Element, errs: _Errors, connected: set[str],
-                    protocols: dict[str, str], defined_vars_in: set[str],
-                    step_names: set[str]) -> Step | None:
+                    protocols: dict[str, str], step_names: set[str]) -> Step | None:
         self._check_attrs(el, errs)
         line, _ = _pos(el)
 
@@ -385,12 +395,12 @@ class ScriptParser:
         instructions: list = []
         limit_el: ET.Element | None = None
         has_comm = False
-        local_defined = set(defined_vars_in)
+        local_defined: set[str] = set()
 
         for child in el:
             if child.tag not in STEP_TAGS:
                 code = "E107" if child.tag in {"if", "loop", "call"} else "E102"
-                hint = "（v2 预留标签，v1 不支持）" if code == "E107" else ""
+                hint = "（预留标签）" if code == "E107" else ""
                 errs.add(f"step {name!r} 内出现未知标签 <{child.tag}>{hint}", code, child)
                 continue
 
@@ -461,7 +471,7 @@ class ScriptParser:
                 errs.add("send mode=\"file\" 必须给出 file", "E121", el)
             chunk_size = self._int_attr(el, "chunk_size", 8, errs, minimum=1) or 8
             seq_len = self._seq_len_attr(el, errs)
-            header = self._header_attr(el, errs)
+            header = self._byte_string_attr(el, "header", errs)
             interval = self._num_attr(el, "interval", 0.0, errs, positive=False) or 0.0
             self._check_chunk_fits(el, errs, chunk_size, header, seq_len, protocol)
             if can_id is None:
@@ -487,7 +497,7 @@ class ScriptParser:
                     if m:
                         vname = m.group(1)
                         if vname not in defined_vars:
-                            errs.add(f"send data 引用了尚未定义的变量 ${{{vname}}}", "E208", el)
+                            errs.add(f"send data 的变量 ${{{vname}}} 尚未在本 step 定义", "E208", el)
                         data.append(VarRef(vname, line))
                     else:
                         errs.add(
@@ -526,13 +536,20 @@ class ScriptParser:
         min_len = self._int_attr(el, "min_len", 0, errs, minimum=0)
         if min_len is not None and min_len > max_len:
             errs.add(f"min_len 不能超过 {max_len}", "E105", el)
+        match_data = bytes(self._byte_string_attr(el, "match_data", errs))
+        match_offset = self._int_attr(el, "match_offset", 0, errs, minimum=0) or 0
+        if ("match_data" in el.attrib or "match_offset" in el.attrib) and not el.get("match_data", "").strip():
+            errs.add("应答匹配需要至少一个 match_data 字节", "E105", el)
+        if match_data and match_offset + len(match_data) > max_len:
+            errs.add(f"应答匹配范围不能超过 {max_len} 字节", "E105", el)
 
         if mode == "file":
             kw = self._parse_wait_file(el, errs, protocol, defined_vars)
             if can_id is None:
                 return None
             return Wait(id=can_id, ext=bool(ext), id_mask=mask, timeout=timeout,
-                        drain=drain, min_len=min_len or 0, mode="file", line=line, **kw)
+                        drain=drain, min_len=min_len or 0, mode="file", line=line,
+                        match_data=match_data, match_offset=match_offset, **kw)
 
         # mode == single
         for attr in sorted(WAIT_FILE_ATTRS):
@@ -551,7 +568,7 @@ class ScriptParser:
         return Wait(
             id=can_id, ext=bool(ext), id_mask=mask, timeout=timeout,
             drain=drain, min_len=min_len or 0, fields=tuple(f for f in fields if f),
-            mode="single", line=line,
+            mode="single", line=line, match_data=match_data, match_offset=match_offset,
         )
 
     def _parse_wait_file(self, el: ET.Element, errs: _Errors,
@@ -568,7 +585,7 @@ class ScriptParser:
         if "chunk_size" in el.attrib:
             chunk_size = self._int_attr(el, "chunk_size", None, errs, minimum=1)
         seq_len = self._seq_len_attr(el, errs, code="E122")
-        header = self._header_attr(el, errs, code="E122")
+        header = self._byte_string_attr(el, "header", errs, code="E122")
         size = self._int_attr(el, "size", None, errs, minimum=0)
         chunks = self._int_attr(el, "chunks", None, errs, minimum=1)
         idle_gap = None
@@ -576,19 +593,22 @@ class ScriptParser:
             idle_gap = self._num_attr(el, "idle_gap", None, errs, positive=True)
         max_size = self._int_attr(el, "max_size", 64 * 1024 * 1024, errs, minimum=1) \
             or 64 * 1024 * 1024
-        if size is None and chunks is None and idle_gap is None:
+        if len(el.attrib.keys() & {"size", "chunks", "idle_gap"}) != 1:
             errs.add(
-                "wait mode=\"file\" 必须给出 size / chunks / idle_gap 之一作为终止条件",
+                "wait mode=\"file\" 必须从 size / chunks / idle_gap 中选择一个终止条件",
                 "E122", el)
         if size is not None and size > max_size:
             errs.add(f"size({size}) 不能大于 max_size({max_size})", "E122", el)
 
         checksum = self._mode_attr(el, errs, CHECKSUMS, tag="wait", attr="checksum")
         checksum_value = None
-        if "checksum_value" in el.attrib:
-            checksum_value = self._checksum_value(el, errs, defined_vars)
-        if checksum in (None, "none") and checksum_value is not None:
-            errs.add("给出 checksum_value 时 checksum 不能为 none", "E122", el)
+        if checksum in CHECKSUM_LENGTHS:
+            if "checksum_value" in el.attrib:
+                checksum_value = self._checksum_value(el, errs, defined_vars, checksum)
+            else:
+                errs.add("启用文件校验时必须提供 checksum_value", "E122", el)
+        elif "checksum_value" in el.attrib:
+            errs.add("给出 checksum_value 时必须选择校验算法", "E122", el)
 
         self._check_chunk_fits(el, errs, chunk_size or 1, header, seq_len,
                                protocol, code="E122")
@@ -599,21 +619,20 @@ class ScriptParser:
         )
         return kw
 
-    def _checksum_value(self, el: ET.Element, errs: _Errors, defined_vars: set[str]):
+    def _checksum_value(self, el: ET.Element, errs: _Errors, defined_vars: set[str],
+                        checksum: str) -> str | VarRef:
         raw = el.attrib["checksum_value"].strip()
         m = _VARREF_RE.match(raw)
         if m:
             if m.group(1) not in defined_vars:
                 errs.add(
-                    f"wait 的 checksum_value 引用了尚未定义的变量 ${{{m.group(1)}}}",
+                    f"wait 的 checksum_value 变量 ${{{m.group(1)}}} 尚未在本 step 定义",
                     "E208", el)
             return VarRef(m.group(1), *())
-        compact = raw.replace("0x", "").replace("0X", "").replace(" ", "")
-        if not compact or any(c not in "0123456789abcdefABCDEF" for c in compact) \
-                or len(compact) % 2:
-            errs.add(
-                f"checksum_value 必须是十六进制字符串或 ${{var}}，实际 {raw!r}",
-                "E122", el)
+        try:
+            normalize_checksum_value(raw, checksum)
+        except FileTransferError as exc:
+            errs.add(exc.message, "E122", el)
         return raw
 
     def _parse_field(self, el: ET.Element, errs: _Errors, max_len: int) -> Field | None:
@@ -653,7 +672,7 @@ class ScriptParser:
                 errs.add(f"<action> 缺少必填属性 {req!r}", "E104", el)
         for reserved in ("driver", "method"):
             if reserved in el.attrib:
-                errs.add(f"action 不支持属性 {reserved!r}（v1 使用 handler=\"module:func\"）", "E103", el)
+                errs.add(f"action 不支持属性 {reserved!r}，请使用 handler=\"module:func\"", "E103", el)
         handler = _attr(el, "handler", "")
         var = _attr(el, "var")
         if var and not _VAR_RE.match(var):
@@ -673,7 +692,7 @@ class ScriptParser:
             m = _VARREF_RE.match(val.strip())
             if m:
                 if m.group(1) not in defined_vars:
-                    errs.add(f"action 入参 {key!r} 引用了尚未定义的变量 ${{{m.group(1)}}}", "E208", el)
+                    errs.add(f"action 入参 {key!r} 的变量 ${{{m.group(1)}}} 尚未在本 step 定义", "E208", el)
                 kwargs[key] = VarRef(m.group(1), *())
             else:
                 kwargs[key] = val
@@ -743,7 +762,7 @@ class ScriptParser:
         if m:
             if m.group(1) not in defined_vars:
                 errs.add(
-                    f"step {step_name!r} 的 limit {attr} 引用了尚未定义的变量 ${{{m.group(1)}}}",
+                    f"step {step_name!r} 的 limit {attr} 变量 ${{{m.group(1)}}} 尚未在本 step 定义",
                     "E208", el)
             return VarRef(m.group(1), *())
         # 数值位不允许混合文本：要么整数/浮点，要么报 E114
@@ -794,9 +813,10 @@ class ScriptParser:
             return 0
         return value
 
-    def _header_attr(self, el: ET.Element, errs: _Errors, code: str = "E105") -> tuple[int, ...]:
-        """文件传输每帧固定前缀字节（空格分隔十六进制）。"""
-        raw = el.attrib.get("header")
+    def _byte_string_attr(self, el: ET.Element, attr: str, errs: _Errors,
+                          code: str = "E105") -> tuple[int, ...]:
+        """读取空格分隔的十六进制字节。"""
+        raw = el.attrib.get(attr)
         if not raw:
             return ()
         out: list[int] = []
@@ -805,7 +825,7 @@ class ScriptParser:
                 out.append(int(tok, 16))
             else:
                 errs.add(
-                    f"<{el.tag}> 的 header 含非法字节 {tok!r}（应为 00-FF）",
+                    f"<{el.tag}> 的 {attr} 含非法字节 {tok!r}（应为 00-FF）",
                     code, el)
         return tuple(out)
 

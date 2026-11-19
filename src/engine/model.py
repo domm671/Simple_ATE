@@ -102,6 +102,8 @@ class Wait:
     checksum: str = "none"                # mode=file: none/crc32/crc16_modbus/sum8
     checksum_value: Any = None            # 期望校验值（十六进制字符串或 VarRef）
     line: int = 0
+    match_data: bytes = b""               # 应答中的固定字节
+    match_offset: int = 0                 # 从原始 Frame.data 开头计算
 
 
 @dataclass(frozen=True)

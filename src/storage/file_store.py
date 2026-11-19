@@ -92,16 +92,12 @@ class FileResultStore:
     def create_run(self, meta: RunMeta) -> RunHandle:
         path, lock = self._reserve(self.root / self._target_dir(), meta.sn)
         payload = {
-            "sn": meta.sn,
-            "script_name": meta.script_name,
-            "script_version": meta.script_version,
-            "script_sha256": meta.script_sha256,
-            "software_version": meta.software_version,
-            "station_id": meta.station_id,
-            "start_time": meta.start_time,
+            **meta.to_dict(),
             "end_time": None,
             "result": None,
             "items": [],
+            "executed_steps": 0,
+            "termination_reason": None,
         }
         try:
             _atomic_write_json(path, payload)
@@ -124,6 +120,7 @@ class FileResultStore:
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f)
         payload["items"].append(item.to_dict())
+        payload["executed_steps"] = len(payload["items"])
         _atomic_write_json(path, payload)
 
     def finish_run(self, handle: RunHandle, result: str, end_time: str) -> RunResult:
@@ -133,6 +130,7 @@ class FileResultStore:
                 payload = json.load(f)
             payload["end_time"] = end_time
             payload["result"] = result
+            payload["termination_reason"] = handle.termination_reason
             _atomic_write_json(path, payload)
         finally:
             self._release(path, handle.token)
@@ -145,10 +143,14 @@ class FileResultStore:
             sn=p["sn"], script_name=p["script_name"], script_version=p["script_version"],
             script_sha256=p.get("script_sha256", ""), software_version=p.get("software_version", ""),
             station_id=p.get("station_id", ""), start_time=p.get("start_time", ""),
+            run_id=p.get("run_id"), planned_steps=p.get("planned_steps"),
+            station_mode=p.get("station_mode"), station_config_sha256=p.get("station_config_sha256"),
+            resource_backends=p.get("resource_backends", []),
         )
         return RunResult(meta=meta, end_time=p.get("end_time", ""),
                          result=p.get("result", ""),
-                         items=[ItemResult.from_dict(d) for d in p.get("items", [])])
+                         items=[ItemResult.from_dict(d) for d in p.get("items", [])],
+                         termination_reason=p.get("termination_reason"))
 
     def recover_aborted(self) -> int:
         """把 pending/uploaded 中缺少结论的残留文件标记为 ABORT。返回处理个数。"""
@@ -177,6 +179,7 @@ class FileResultStore:
         if not isinstance(payload, dict) or "sn" not in payload or payload.get("result"):
             return False
         payload["result"] = "ABORT"
+        payload["termination_reason"] = "crash_recovery"
         payload["end_time"] = payload.get("end_time") or datetime.now().isoformat(timespec="seconds")
         _atomic_write_json(path, payload)
         return True

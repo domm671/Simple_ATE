@@ -2,7 +2,7 @@
 
 本文件面向在本仓库工作的 AI 编码助手（也适合新加入的人类开发者），说明项目是什么、如何构建/测试、代码如何组织、以及改动时必须遵守的约束。
 
-> 权威文档：`README.md`（上手与运行）、`设计说明.md`（架构与设计决策）、`ATE脚本格式规范.md`（Script XML v1 唯一语法权威）。修改脚本语法时必须同步更新规范文档。
+> 权威文档：`README.md`（上手与运行）、`设计说明.md`（架构与设计决策）、`ATE脚本格式规范.md`（XML 语法权威）。修改脚本语法时必须同步更新规范文档。
 
 ---
 
@@ -20,7 +20,7 @@ Simple_ATE 是一个尽量小的产线自动测试（ATE/FT）执行软件，运
 
 当前里程碑：M1（无头引擎 + Mock）✅、M2（PySide6 GUI 含脚本编辑器）✅、M3（真实 CAN/串口/USB/Modbus 联调，适配代码已就位）⬜、M4（MES Outbox 上传）⬜。
 
-v2.1 脚本增强：`<connect>` 可携带 `protocol` 与串口/Modbus/USB/CAN 参数（脚本优先于工位配置）；`<limit mode="manual">` 界面弹窗人工判定；`<send mode="file">`/`<wait mode="file">` 文件分块传输。
+脚本支持各协议资源、人工判定和文件分块传输。生产模式由工位绑定真实通信后端，调试模式支持内联连接参数及 Mock。
 
 ## 2. 技术栈与依赖纪律
 
@@ -132,7 +132,7 @@ ui  ──Qt Signal(queued)──▶ EngineListener 回调  ──▶ engine ─
 
 - `Engine.run(script, sn, trace_path)` 是唯一执行入口；通过 `EngineListener`（`on_run_start/on_step_start/on_step_finish/on_log/on_trace/on_run_finish`）对外发事件。CLI 与 GUI 各自实现监听，不要把展示逻辑塞进引擎。
 - 通信为**同步接口**（`open/close/send/recv(timeout)`），`recv` 超时必须抛 `errors.TimeoutAteError`（E301）。不使用 asyncio。
-- 资源由 `Engine._build_resource` 按 `station.toml` 的 `[resources.xxx] type` 创建（mock/can/serial）；脚本只引用逻辑资源名，硬件参数绝不进脚本。
+- 资源由 `Engine._build_resource` 按生效配置创建。生产脚本只指定逻辑资源名和可选协议要求，后端与硬件参数由 `station.toml` 绑定。
 - 停止通过 `threading.Event` 协作式中断（`request_stop()`），不 kill 线程；指令边界、Attempt 之间、`delay` 每 50ms（`_interruptible_sleep`）、wait 轮询（50ms 粒度）检查停止标志。
 - 所有已打开资源在 `Engine.run` 的 `finally` 中无条件 `close()`。
 - GUI 线程模型：`RunWorker` 把 `_Runner` `moveToThread` 到 `QThread`；`EngineBridge`（QObject + EngineListener）在工作线程被回调，经 Qt 信号自动以 queued connection 投递主线程。**UI 线程绝不直接调用通信层或 Engine 阻塞方法**；桥接信号只传快照/基本类型，不传 `RunContext` 等带句柄对象。
@@ -141,15 +141,15 @@ ui  ──Qt Signal(queued)──▶ EngineListener 回调  ──▶ engine ─
 
 ## 6. 执行语义（改动引擎时务必保持）
 
-- Run 结论聚合：任一步 **ERROR → Run=ERROR**（ERROR 优先于 FAIL，工装异常绝不计产品不良）；否则任一 FAIL → FAIL；全 PASS → PASS；人工停止 → ABORT（已有明细保留）。
+- Run 结论聚合：任一步 **ERROR → Run=ERROR**（ERROR 优先于 FAIL，工装异常绝不计产品不良）；否则任一 FAIL → FAIL。PASS 要求至少一个计划步且所有计划步执行通过。人工停止 → ABORT（已有明细保留）。
 - step 的 `on_fail`：`abort`（默认）FAIL/ERROR 即终止；`continue` 记录后继续。
 - **retry 只针对 `retryable=True` 的 `RuntimeAteError`**（E301/E302/E305/E306），重试粒度是整个 step（总尝试 = retry+1）；**判定 FAIL、E209、E307 不重试**；未预期异常记 E303。
 - `wait drain="before"`（默认）在**配对 send 之前**清空接收缓冲（`frame_io.drain`）；独立 wait 在等待开始时清空。注意 drain 不能放在 `do_wait` 内，否则会删掉同步 mock 中 send 即刻入队的应答。
 - field：无符号整数按 offset/length/endian 取 raw，`value = raw*gain+bias`（`raw="true"` 跳过换算）；越界 E305（可重试）。浮点结果经 `_round_engineering` 消除尾数噪声。
 - 人工判定：`<limit mode="manual" prompt="...">` 经 `EngineListener.on_manual_judge` 回调（UI 弹窗 / CLI 询问），True/False/None → PASS/FAIL/ABORT；不重试；结果 `judge_mode="manual"`。
-- 文件传输：`<send mode="file">` 按 header+序号+分块逐帧发；`<wait mode="file">` 以 size/chunks/idle_gap 终止并原子落盘，可选 checksum；失败 E308（可重试）。
-- 连接：`<connect protocol="can/serial/modbus/usb/mock" ...>` 脚本参数覆盖工位配置；未给 protocol 时资源必须在工位配置中（否则 E204）。
-- 变量为 Run 级全局，`${name}` 仅简单取值，无表达式；解析期做"定义先于引用"检查。
+- 文件传输：`<send mode="file">` 按 header+序号+分块逐帧发。`<wait mode="file">` 从 size/chunks/idle_gap 选一个终止条件，启用 checksum 时须给出 checksum_value。
+- 连接：生产模式按工位配置绑定真实资源，可选的脚本 `protocol` 用于核对协议。调试模式可用 `protocol` 与内联参数覆盖工位配置。
+- 变量仅在当前工步的本次 Attempt 内可见。每次尝试从空变量表开始，退出时清空变量和工程单位。解析器对 `${name}` 做同一步内的先定义后引用检查。
 - 结果文件每步完成即整体覆写（临时文件 + `os.replace` 原子替换 + fsync）；启动时 `FileResultStore.recover_aborted()` 把缺 `result` 字段的残留文件标记为 ABORT；同名 SN 用时间戳 + 序号保证永不覆盖历史。
 
 ## 7. 代码风格约定
@@ -165,7 +165,7 @@ ui  ──Qt Signal(queued)──▶ EngineListener 回调  ──▶ engine ─
 
 ## 8. 脚本/配置/Mock 格式要点
 
-- Script XML v1：根 `<test name version>`；顶层仅 `connect/disconnect/step/delay`；step 内仅 `send/wait/delay/action`，且至多一个 `limit` 且必须在最后，至少含一条 send/wait/action；`if/loop/call` 是 v2 预留标签，解析到报 E107。
+- Script XML：根 `<test name version>` 中的 `version` 由产品脚本作者维护。顶层仅 `connect/disconnect/step/delay`，生产脚本至少含一个 `step`。step 内仅 `send/wait/delay/action`，且至多一个 `limit` 且必须在最后，至少含一条 send/wait/action。`if/loop/call` 是预留标签，解析到报 E107。
 - 解析器设计为**一次收集全部静态错误**（`ScriptParseErrors` 带错误码/行/列/中文说明），新增校验时沿用 `_Errors.add`，不要遇到第一个错误就返回。
 - 错误码段位：E1xx 结构/类型、E2xx 语义/资源/变量/扩展（加载期）；E3xx 运行期。完整清单见《ATE脚本格式规范.md》第 10 章。
 - `station.toml` 用标准库 tomllib；SN 默认不校验（仅非空），启用 `sn.validation_enabled` + `pattern` 后才拦；扫码回车自启受 `sn.auto_start` 控制。

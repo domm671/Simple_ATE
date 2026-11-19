@@ -37,6 +37,7 @@ from .model import Send as SendSpec
 from .model import VarRef
 from .model import Wait as WaitSpec
 
+CHECKSUM_LENGTHS = {"crc32": 4, "crc16_modbus": 2, "sum8": 1}
 
 @dataclass
 class FileTransferStats:
@@ -135,7 +136,7 @@ def do_wait(spec: WaitSpec, comm: Communication, variables: dict,
             continue
         if on_frame is not None:
             on_frame(frame)
-        if frame.ext == spec.ext and _id_matches(frame, spec) and len(frame.data) >= spec.min_len:
+        if _matches(frame, spec):
             extracted: dict[str, int | float] = {}
             for fld in spec.fields:
                 extracted[fld.var] = extract_field(frame, fld)
@@ -196,15 +197,17 @@ def _atomic_write(path: Path, data: bytes) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def _id_matches(frame: Frame, spec: WaitSpec) -> bool:
-    if spec.id_mask is None:
-        return frame.id == spec.id
-    return (frame.id & spec.id_mask) == (spec.id & spec.id_mask)
+def _matches(frame: Frame, spec: WaitSpec) -> bool:
+    if frame.ext != spec.ext or len(frame.data) < spec.min_len:
+        return False
+    mask = spec.id_mask
+    id_matches = frame.id == spec.id if mask is None else (frame.id & mask) == (spec.id & mask)
+    return id_matches and (not spec.match_data or frame.data.startswith(spec.match_data, spec.match_offset))
 
 
-def _normalize_checksum_value(value: Any, kind: str) -> bytes:
+def normalize_checksum_value(value: Any, kind: str) -> bytes:
     """把 checksum_value（十六进制字符串 / 整数）归一化为字节串。"""
-    length = {"crc32": 4, "crc16_modbus": 2, "sum8": 1}[kind]
+    length = CHECKSUM_LENGTHS[kind]
     try:
         if isinstance(value, int) and not isinstance(value, bool):
             return value.to_bytes(length, "big")
@@ -257,13 +260,19 @@ def do_wait_file(spec: WaitSpec, comm: Communication, variables: dict,
     """
     timeout = spec.timeout if spec.timeout is not None else default_timeout
     header = bytes(spec.header)
+    if sum(value is not None for value in (spec.size, spec.chunks, spec.idle_gap)) != 1:
+        raise FileTransferError("必须从 size / chunks / idle_gap 中选择一个文件接收终止条件")
     expected: bytes | None = None
-    if spec.checksum != "none" and spec.checksum_value is not None:
+    if spec.checksum != "none":
+        if spec.checksum not in CHECKSUM_LENGTHS:
+            raise FileTransferError(f"未知校验算法: {spec.checksum}")
         try:
-            expected = _normalize_checksum_value(
+            expected = normalize_checksum_value(
                 resolve_value(spec.checksum_value, variables), spec.checksum)
         except JudgeTypeError as exc:
             raise FileTransferError(exc.message) from exc
+    elif spec.checksum_value is not None:
+        raise FileTransferError("给出 checksum_value 时必须选择校验算法")
 
     ordered: dict[int, bytes] = {}
     appended: list[bytes] = []
@@ -293,7 +302,7 @@ def do_wait_file(spec: WaitSpec, comm: Communication, variables: dict,
             continue
         if on_frame is not None:
             on_frame(frame)
-        if frame.ext != spec.ext or not _id_matches(frame, spec) or len(frame.data) < spec.min_len:
+        if not _matches(frame, spec):
             continue
 
         data = frame.data
@@ -332,8 +341,6 @@ def do_wait_file(spec: WaitSpec, comm: Communication, variables: dict,
         buf = b"".join(ordered[k] for k in range(chunks))
     else:
         buf = b"".join(appended)
-    if spec.size is not None and len(buf) > spec.size:
-        buf = buf[:spec.size]
     if spec.size is not None and len(buf) != spec.size:
         raise FileTransferError(
             f"接收文件长度 {len(buf)} 字节与期望 size={spec.size} 不符")

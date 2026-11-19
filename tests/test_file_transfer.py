@@ -148,7 +148,7 @@ class TestFileTransfer(unittest.TestCase):
 
     def test_max_size_guard(self):
         comm = FakeComm([Frame(id=0x10, data=bytes(16))])
-        wait = WaitSpec(id=0x10, mode="file", file="out.bin", max_size=8)
+        wait = WaitSpec(id=0x10, mode="file", file="out.bin", size=8, max_size=8)
         with self.assertRaises(FileTransferError):
             do_wait_file(wait, comm, {}, self.tmp, 1.0)
 
@@ -201,6 +201,21 @@ class TestFileTransfer(unittest.TestCase):
         with self.assertRaises(TimeoutAteError):
             do_wait_file(wait, FakeComm(frames), {}, self.tmp, 0.01)
         self.assertEqual(destination.read_bytes(), b"original")
+
+    def test_expected_size_cannot_silently_truncate_excess_bytes(self):
+        target = self.tmp / "out.bin"
+        target.write_bytes(b"previous")
+        wait = WaitSpec(id=1, mode="file", file="out.bin", size=1)
+        with self.assertRaises(FileTransferError):
+            do_wait_file(wait, FakeComm([Frame(id=1, data=b"AB")]), {}, self.tmp, 0.1)
+        self.assertEqual(target.read_bytes(), b"previous")
+
+    def test_file_match_checks_original_frame_and_verifies_checksum(self):
+        frames = [Frame(id=1, data=b"\xaa\xbbX"), Frame(id=1, data=b"\xaa\xccB")]
+        wait = WaitSpec(id=1, mode="file", file="out.bin", header=(0xAA,), size=2,
+                        match_offset=1, match_data=b"\xcc", checksum="sum8", checksum_value="0E")
+        do_wait_file(wait, FakeComm(frames), {}, self.tmp, 0.1)
+        self.assertEqual((self.tmp / "out.bin").read_bytes(), b"\xccB")
 
     def test_gap_in_sequence_rejects_file_even_at_expected_length(self):
         frames = [Frame(id=1, data=b"\x00A"), Frame(id=1, data=b"\x02C")]

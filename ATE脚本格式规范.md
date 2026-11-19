@@ -1,8 +1,7 @@
 # simple_ATE 测试脚本格式规范
 
-- 文档版本：v2.1（在 v2.0 声明式帧模型基础上，新增串口/Modbus/USB 连接配置、人工判定、文件传输）
+- **规范版本 v2.2**，统一标识本文档及其定义的 XML 语言。
 - 适用软件：simple_ATE v0.1
-- 脚本语言版本：**Script XML v1**（对应根节点 `<test version="1.x">`）
 - 状态：评审通过
 
 ---
@@ -33,9 +32,9 @@ CAN 帧的 ID、数据、应答匹配方式、字段解析与换算全部以标�
 1. 节点即语句类型，属性即参数；
 2. 只允许本规范定义的标签与属性；
 3. 内建原语支持**经典 CAN**（11/29 位 ID，数据 0–8 字节）、**串口**（RS232/485）、**USB CDC 虚拟串口**与 **Modbus RTU/ASCII/TCP** 的顺序"发—等—判"流程；
-4. 默认情况下工位硬件参数（接口型号、通道、波特率）放工位配置；从 v2.1 起，脚本 `<connect>` 可携带 `protocol` 及串口/Modbus/USB/CAN 参数，**脚本属性优先于工位配置**，便于单脚本自描述；
+4. 生产模式由工位配置绑定硬件。脚本通过 `<connect>` 声明逻辑资源及可选的协议要求。调试模式可内联覆盖连接参数和使用 Mock。
 5. 单次通讯外，`<send>`/`<wait>` 支持 `mode="file"` 的文件分块传输；
-6. v1 仅顺序执行，无条件分支、循环、子脚本；
+6. 测试步骤按文档顺序执行。
 7. 变量仅支持 `${name}` 简单取值，**不支持表达式运算**；脚本中不允许出现任意 Python 代码（扩展白名单内的命名函数除外）；
 8. `<limit>` 支持 `mode="auto"`（按返回帧自动判定，默认）与 `mode="manual"`（界面弹窗人工判定）。
 
@@ -94,6 +93,7 @@ CAN 帧的 ID、数据、应答匹配方式、字段解析与换算全部以标�
 - 顶层允许的子元素**仅**：`connect`、`disconnect`、`step`、`delay`；
 - `step` 内允许的子元素**仅**：`send`、`wait`、`delay`、`action`、`limit`；
 - `wait` 内允许的子元素**仅**：`field`。
+- 生产脚本至少包含一个可执行 `step`。所有声明的 `step` 均计入测试计划。
 - 叶子元素无子元素，元素内容只允许结构化标签与用于缩进的空白。语义错误使用从 1 开始的行号和从 0 开始的列号。
 
 ---
@@ -119,10 +119,10 @@ step        = "<step" step-attr ">"
 send        = "<send" id-attr ext-attr? data-attr? (send-single | send-file) "/>" ;
 send-single = (* data-attr 必填或可为空 *)
 send-file   = "mode=\"file\"" file-attr chunk-attr? seqlen-attr? header-attr? interval-attr? ;
-wait        = "<wait" wait-attr ("</wait>" | wait-file) ;
+wait        = "<wait" wait-attr ("/>" | ">" field* "</wait>" | wait-file "/>") ;
 wait-file   = "mode=\"file\"" file-attr chunk-attr? seqlen-attr? header-attr?
               (size-attr | chunks-attr | idle-gap-attr) maxsize-attr?
-              checksum-attr? checksumvalue-attr? "/" ;
+              ("checksum=\"none\"" | checksum-attr checksumvalue-attr)? ;
 field       = "<field" field-attr "/>" ;
 action      = "<action" handler-attr var-attr? param-attr* "/>" ;
 limit       = "<limit" limit-attr "/>" ;
@@ -133,7 +133,10 @@ step-attr   = "name=\"" step-name "\"" resource-attr?
 id-attr     = "id=\"" can-id "\"" "id_mask=\"" can-id "\""? ;
 data-attr   = "data=\"" {byte-token}+"\"" ;
 ext-attr    = "ext=\"" bool "\"" ;
-wait-attr   = id-attr ext-attr? timeout-attr? drain-attr? minlen-attr? ;
+wait-attr   = id-attr ext-attr? timeout-attr? drain-attr? minlen-attr?
+              (matchdata-attr matchoffset-attr?)? ;
+matchdata-attr   = "match_data=\"" hex-byte {hex-byte} "\"" ;
+matchoffset-attr = "match_offset=\"<non-negative-int>\"" ;
 field-attr  = "var=\"" variable-name "\""
               offset-attr length-attr? endian-attr?
               gain-attr? bias-attr? raw-attr? field-unit-attr? ;
@@ -151,14 +154,13 @@ byte-token  = hex-byte | variable-ref ;       # data 中每个 token 占一个�
 | 属性 | 必填 | 类型 | 说明 |
 |---|---|---|---|
 | `name` | 是 | 标识符 | 正则 `^[A-Za-z0-9_-]+$` |
-| `version` | 是 | 版本串 | 正则 `^\d+\.\d+(\.\d+)?$`，如 `1.0`；脚本改动应升版本 |
+| `version` | 是 | 产品脚本版本 | 由脚本作者维护，格式为两段或三段数字，例如 `1.0` 或 `9.4.2` |
 
-引擎运行时另记脚本文件 SHA-256 校验和，与版本一起写入结果文件。
+引擎运行时将产品脚本版本和脚本文件的 SHA-256 一起写入结果文件。XML 语言使用本页的统一规范版本。
 
 ### 5.2 `<connect>` / `<disconnect>`
 
-`<connect>` 负责打开一条逻辑通信资源，并可在脚本内联给出协议与物理参数。
-从 v2.1 起支持 **CAN / 串口 / Modbus / USB CDC 虚拟串口 / Mock** 五类协议。
+`<connect>` 负责打开一条逻辑通信资源，支持 **CAN / 串口 / Modbus / USB CDC 虚拟串口 / Mock**。
 
 | 属性 | 适用协议 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
@@ -187,8 +189,8 @@ byte-token  = hex-byte | variable-ref ;       # data 中每个 token 占一个�
 
 规则：
 
-- 未给 `protocol` 时，资源必须已存在于工位配置（否则 **E204**）；给了 `protocol` 时允许在脚本内联定义资源，脚本参数覆盖工位配置同名项；
-- 切换工位资源的协议时，其他适用参数仍可继承。`mock_script` 需在脚本中显式指定；
+- **生产模式** `mode = "production"` 下只接受 `resource` 和可选 `protocol`。资源须存在于工位配置（E204），且绑定真实后端。声明的 `protocol` 须匹配工位 `type`，内联参数和 Mock 均报 E211。Modbus TCP 可在 `[resources.xxx]` 设置 `connect_timeout`，默认 3 秒。
+- **调试模式** `mode = "debug"` 下，未给 `protocol` 时资源须存在于工位配置。显式指定协议时允许内联定义和覆盖参数。切换协议时，沿用适用参数，Mock 须在脚本中显式启用。
 - 参数值非法（未知协议、波特率非正、校验位未知等）→ **E105**；
 - 同一资源重复 `connect`，或 `disconnect` 未连接的资源：加载期报 E210；
 - `connect` 失败属于设备异常，Run 直接以 **ERROR** 结束（E302）；
@@ -197,6 +199,10 @@ byte-token  = hex-byte | variable-ref ;       # data 中每个 token 占一个�
 - `protocol="modbus"` 时 `<send>` 的 `id` 为从站地址（0 使用 `unit` 配置），`data` 为 PDU（功能码 + 数据，1–253 字节）。通信层附加 CRC、LRC 或 MBAP，`<wait>` 返回的 `data` 亦为 PDU。TCP 应答须匹配当前请求的事务号和单元地址。
 
 ```xml
+<!-- 生产模式下由工位绑定真实 CAN -->
+<connect resource="can_main" protocol="can"/>
+
+<!-- 以下为调试模式内联示例 -->
 <!-- 串口：115200 8N1 -->
 <connect resource="rs485" protocol="serial" port="COM3" baudrate="115200"/>
 
@@ -265,7 +271,7 @@ byte-token  = hex-byte | variable-ref ;       # data 中每个 token 占一个�
 - 每个 token 占**恰好一个字节**：十六进制字面量（`00`–`FF`，大小写不敏感）或单字节变量引用 `${name}`；
 - token 上限为 CAN/Mock 8 字节、Modbus 253 字节、串口/USB 4096 字节，超限报 E115；
 - 字面量超出 `0xFF` 报 E105；
-- 变量必须在**当前指令之前**已由 `field` 或 `action var` 定义，且运行期值为 0–255 的 int；否则分别报 E208 / E307。
+- 变量必须由当前 `step` 内更早的 `field` 或 `action var` 定义，运行期值须为 0–255 的 int。引用错误报 E208，运行期类型或范围错误报 E307。
 
 ```xml
 <send id="0x18FF50E5" ext="true" data="02 01 00"/>
@@ -276,7 +282,7 @@ byte-token  = hex-byte | variable-ref ;       # data 中每个 token 占一个�
 
 ### 5.5 `<wait>`（等待应答 / 接收文件）
 
-`mode="single"`（默认）：
+通用属性适用于单帧等待（默认）和文件接收。
 
 | 属性 | 必填 | 类型 | 默认 | 说明 |
 |---|---|---|---|---|
@@ -285,7 +291,9 @@ byte-token  = hex-byte | variable-ref ;       # data 中每个 token 占一个�
 | `id_mask` | 否 | CAN ID | 精确匹配 | 匹配掩码：`(recv_id & id_mask) == (id & id_mask)` 即命中 |
 | `timeout` | 否 | 秒(float>0) | 取 step 的 `timeout` | 本次等待的时限 |
 | `drain` | 否 | 枚举 | `before` | `before`：在与之配对的 `<send>` 发送**之前**清空接收缓冲；`off`：不清空 |
-| `min_len` | 否 | int | 0 | 应答帧最小数据长度；CAN 上限 8，串口上限 4096 |
+| `min_len` | 否 | int | 0 | 应答帧最小数据长度，受协议帧上限约束 |
+| `match_data` | 否 | 十六进制字节串 | — | 从指定偏移逐字节匹配固定内容，例如 `02 01` |
+| `match_offset` | 否 | int(≥0) | `0` | 从 `Frame.data` 开头计算。给出偏移时须提供 `match_data`，匹配范围须在协议帧上限内 |
 
 `mode="file"`（大文件接收，多帧拼装）：
 
@@ -295,28 +303,28 @@ byte-token  = hex-byte | variable-ref ;       # data 中每个 token 占一个�
 | `chunk_size` | 否 | int | 整帧剩余 | 每帧有效数据字节数，超出部分截断 |
 | `seq_len` | 否 | 枚举 | `0` | 每帧序号字节数，与发送侧一致。启用时从 0 开始连续编号，支持乱序和相同内容的重复帧 |
 | `header` | 否 | 字节串 | 空 | 期望前缀，不匹配的帧被忽略 |
-| `size` | 终止条件之一 | int(≥0) | — | 期望总字节数，收满即完成 |
-| `chunks` | 终止条件之一 | int(≥1) | — | 期望帧数，收满即完成 |
-| `idle_gap` | 终止条件之一 | 秒(>0) | — | 收到数据后静默超过该秒数即视为完成 |
+| `size` | 三选一 | int(≥0) | — | 拼装后必须恰好等于期望字节数，超长报 E308 |
+| `chunks` | 三选一 | int(≥1) | — | 收满指定的有效分块数后结束 |
+| `idle_gap` | 三选一 | 秒(>0) | — | 长度未知时使用。收到有效分块后，达到指定静默时长即结束 |
 | `max_size` | 否 | int | `64MiB` | 安全上限，超出抛 E308 |
 | `checksum` | 否 | 枚举 | `none` | `none`/`crc32`/`crc16_modbus`/`sum8` |
-| `checksum_value` | 否 | 十六进制/`${var}` | — | 按校验字节顺序给出期望值。整数变量按校验长度转为大端字节串。提供期望值后才做校验，此时 `checksum` 必须指定算法 |
+| `checksum_value` | 启用校验时必填 | 十六进制/`${var}` | — | 按校验结果的字节顺序给出期望值。`crc32` 为 4 字节，`crc16_modbus` 为 2 字节，`sum8` 为 1 字节。整数变量按对应长度转为大端字节串 |
 | `timeout` | 否 | 秒(float>0) | 取 step 的 `timeout` | 总体等待上限；大文件应显式放大 |
 
 语义：
 
 1. `drain="before"`（默认）在**发送请求帧之前**排空接收队列。`send` 和 `wait` 之间可以有 `delay` 指令。独立 `<wait>` 在等待开始时清空；
-2. 在剩余 timeout 内循环接收，按 ID 类型 + ID（+mask）匹配，**无关帧丢弃但全部写 trace**；
-3. 命中但长度不足 `min_len`：丢弃并继续等；
+2. 在剩余 timeout 内按 ID 类型、ID（可带掩码）、`min_len` 和 `match_data` 筛选。引擎收到的帧均写 trace。
+3. 数据不足以覆盖匹配区间或字节不符时继续等待。文件模式在剥离 `header` 和序号前匹配原始 `Frame.data`。
 4. 超时未收到有效帧 → 通信异常 E301，触发 retry；
 5. 空体 `<wait/>` 只做"应答到达"检查，step 无 limit 时即 PASS；
 6. 含 `field` 时，对命中的那一帧依次提取（仅 `mode="single"`）；
-7. `mode="file"` 时必须给出 `size`/`chunks`/`idle_gap` 之一作为终止条件（E122）；
+7. `mode="file"` 时必须从 `size`、`chunks`、`idle_gap` 中选一个终止条件。启用校验须给出期望值（E122）。
 8. `mode="file"` 的 step 测量值记录为接收到的**字节数**（`unit="B"`）。
 
 ```xml
-<!-- 等待单帧应答 -->
-<wait id="0x18FF50E6" ext="true" timeout="2">
+<!-- 只接收该 ID 下第三个字节为 01 的应答 -->
+<wait id="0x18FF50E6" ext="true" timeout="2" match_data="01" match_offset="2">
     <field var="vbat" offset="0" length="2" endian="little" gain="0.01" unit="V"/>
 </wait>
 
@@ -402,15 +410,14 @@ value   = raw_int * gain + bias       (默认)
 
 ## 6. 变量系统
 
-1. 变量由 `field` 提取或 `<action var>` 产生，属于 **Run 级全局上下文**，同名后赋值覆盖；
-2. 不跨 Run 保留；
-3. 引用语法 `${name}`：
+1. 变量由 `field` 或 `<action var>` 产生，仅在**当前 `step` 的本次 Attempt** 内可见。不同工步可以使用相同变量名，同次 Attempt 内后赋值覆盖前值。
+2. 每次 Attempt（含首次和重试）从空变量表开始。Attempt 结束时清空变量及其工程单位，步骤结果继续记录测量值和单位。
+3. `${name}` 可用于以下位置。
    - `send data` 中：单字节 token（要求 int 0–255）；
-   - `limit value` 中：整体引用一个数值变量；
+   - `limit value` 和 `eq` 中：整体引用一个变量；
    - `wait mode="file"` 的 `checksum_value` 中：引用期望校验值；
    - `action` 入参中：见第 9 章；
-4. v0.1 顺序执行，加载期做"定义先于引用"检查，引用点之前没有任何 `field`/`action var` 定义该变量 → E208；
-5. 失败 Attempt 中已提取的变量会留在上下文，重试时重新提取——脚本不应依赖失败 Attempt 的中间值。
+4. 加载时检查引用点之前是否已在本 `step` 内定义变量，否则报 E208。已有脚本如需使用先前工步采集的数据，可在使用它的工步重新采集，或将采集与引用放入同一工步。
 
 ---
 
@@ -490,7 +497,7 @@ PENDING → RUNNING ─ 全部通信成功且判定通过 ───────�
 | FAIL | 终止，Run=FAIL | 记录并继续 |
 | ERROR | 终止，Run=ERROR | 记录并继续 |
 
-走完所有语句时：① 任一步 ERROR → Run=ERROR；② 否则任一 FAIL → FAIL；③ 全 PASS → PASS。
+走完所有语句时，任一步 ERROR 则 Run=ERROR，其次任一 FAIL 则 Run=FAIL。`PASS` 要求计划中至少有一步，所有计划步骤均已记录且通过。调试时空计划即使通过语法校验，执行结论也为 `ERROR`。Run 结果记录 `planned_steps`、`executed_steps` 和 `termination_reason`。
 **ERROR 优先于 FAIL：工装/通信异常绝不计为产品不良。**
 
 ### 8.6 人工停止（ABORT）
@@ -503,7 +510,7 @@ PENDING → RUNNING ─ 全部通信成功且判定通过 ───────�
   帧间 `interval` 与停止标志每 50ms 检查。空文件不发帧，读文件失败或分块数超出序号容量时报 E308；
 - **接收**（`<wait mode="file">`）：循环接收匹配 ID 的帧，剥离 `header`/序号后拼装；
   同时检查 `min_len`。启用序号时，乱序帧按序号拼装，缺号或重复序号的内容不一致时报 E308；
-  到达 `size`/`chunks`/`idle_gap` 任一终止条件后，校验长度与可选校验值，原子写入 `file`。整体超时前未达到任何终止条件时抛 E301。超过 `max_size`、校验失败或写入失败时抛 E308；
+  达到所选终止条件后，检查长度或分块数，并在启用校验时比较期望值。`size` 要求总长度精确吻合。检查通过后才原子写入 `file`。超时报 E301，超过期望长度或安全上限、校验失败或写入失败时报 E308。
 - 文件相对路径以**脚本所在目录**为基准；
 - 文件传输的 step 测量值为接收字节数（`unit="B"`）；
 - 每次写入使用独立的同目录临时文件，成功才替换目标文件。超时、校验失败或中止时保留已有目标文件。
@@ -530,7 +537,7 @@ PENDING → RUNNING ─ 全部通信成功且判定通过 ───────�
 # extensions/my_uds.py
 def enter_extended_session(ctx, resource, **params):
     """
-    ctx:      运行上下文（SN、变量表、日志）
+    ctx:      运行上下文（SN、当前 Attempt 的变量表、日志）
     resource: 该 step 的 resource 指向的通信资源句柄（单资源时 step.resource 可省略）
     return:   存入 var；无 var 可返回 None
     超时/通信问题抛 TimeoutError / CommunicationError（可重试）；
@@ -560,8 +567,8 @@ def enter_extended_session(ctx, resource, **params):
 | E104 | 缺少必填属性 |
 | E105 | 属性值类型/取值非法（含 data 字节越界） |
 | E106 | step `name` 重复 |
-| E107 | 使用了 v2 预留标签 `if`/`loop`/`call` |
-| E108 | step 内无 send/wait/action |
+| E107 | 使用了预留标签 `if`/`loop`/`call` |
+| E108 | step 内无 send/wait/action，或生产脚本没有可执行步骤 |
 | E109 | step 内多个 limit |
 | E110 | limit 不是 step 最后一个子元素，或 limit 之后还有指令 |
 | E111 | limit 未给出任何判据 |
@@ -578,8 +585,9 @@ def enter_extended_session(ctx, resource, **params):
 | E201 | 扩展模块未在白名单中 |
 | E202 | 扩展模块或 handler 函数不存在 |
 | E204 | 资源未在工位配置中定义 |
-| E208 | 变量在定义之前被引用 / 未定义 |
+| E208 | 在本 step 内引用了尚未定义的变量，含引用其他工步的变量 |
 | E210 | 资源连接或使用错误：step 前未打开资源、多个资源同时打开且 step 未指定 `resource`、指定未连接的资源、重复 connect、disconnect 未连接资源 |
+| E211 | 生产资源绑定不符合要求，例如内联硬件参数、协议不符或绑定了 Mock |
 
 ### 10.2 运行期
 
@@ -597,9 +605,9 @@ def enter_extended_session(ctx, resource, **params):
 
 ---
 
-## 11. v2 预留标签
+## 11. 预留标签
 
-v1 解析到以下标签显式报 E107：
+解析到以下预留标签时报 E107。
 
 ```xml
 <if var="x" gt="10"> … </if>
@@ -607,9 +615,7 @@ v1 解析到以下标签显式报 E107：
 <call script="COMMON"/>
 ```
 
-v1 同样禁止：CAN ID 用变量、一个变量占多字节发送、位域/有符号/BCD 提取、一个 step 跳多个资源。
-
-> 串口/Modbus/USB 内建报文原语已于 v2.1 提供（见第 5.2–5.5 节），不再列为预留。
+CAN ID 使用字面量，发送数据中的变量占一个字节，字段按无符号整数字节段提取，一个 step 绑定一个资源。
 
 ---
 
@@ -621,9 +627,9 @@ v1 同样禁止：CAN ID 用变量、一个变量占多字节发送、位域/有
 4. 变量名带工程含义（`vbat`、`i_sleep`、`relay_st`）；
 5. 所有 wait 默认 `drain="before"`，仅在有意监听异步推送帧时用 `off`；
 6. 修改脚本同步提升根节点 `version`；文件头用注释记录协议假设与变更历史；
-7. 串口/Modbus/USB 资源优先在工位配置集中部署，脚本仅在内联自描述场景给出 `protocol` 与参数；
+7. 生产脚本引用工位配置中的逻辑资源。内联参数用于调试模式。
 8. LED、外观等人眼判定用 `mode="manual"`，提示语写清楚“看什么、怎样算合格”；
-9. 大文件传输的 `<wait mode="file">` 务必显式给出 `timeout`、`size`（或 `idle_gap`）与 `checksum`。
+9. 大文件传输宜显式给出 `timeout` 和一项终止条件。设备提供校验值时，同时填写 `checksum` 和 `checksum_value`。
 
 ---
 
@@ -648,9 +654,9 @@ v1 同样禁止：CAN ID 用变量、一个变量占多字节发送、位域/有
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- 产品：BMS 主控板终检 | 工装：FT_LINE1 CAN | 1.0 初版 -->
-<test name="BMS_FT" version="1.0">
+<test name="BMS_FT" version="1.1">
 
-    <connect resource="can_main" timeout="3"/>
+    <connect resource="can_main"/>
 
     <step name="CAN_COMM" timeout="2" retry="2" retry_interval="0.5" on_fail="abort">
         <send id="0x18FF50E5" ext="true" data="01 00"/>
@@ -687,7 +693,7 @@ v1 同样禁止：CAN ID 用变量、一个变量占多字节发送、位域/有
 </test>
 ```
 
-### 13.3 串口 / Modbus / 人工判定 / 固件升级
+### 13.3 串口 / Modbus / 人工判定 / 固件升级（调试模式内联连接）
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -728,11 +734,15 @@ v1 同样禁止：CAN ID 用变量、一个变量占多字节发送、位域/有
         <limit value="${fw_ack}" eq="1"/>
     </step>
 
-    <!-- 接收设备回传日志：收满 8192 字节，CRC32 校验 -->
+    <!-- 先读取设备提供的四个 CRC32 字节，再接收日志 -->
     <step name="LogUpload" resource="rs485" timeout="60" on_fail="continue">
+        <send id="0" data="BB 00"/>
+        <wait id="0" match_data="BB 00" min_len="6">
+            <field var="log_crc" offset="2" length="4" endian="big" raw="true"/>
+        </wait>
         <send id="0" data="BB 01"/>
         <wait id="0" mode="file" file="recv/log.bin"
-              chunk_size="64" seq_len="2" size="8192" checksum="crc32"/>
+              chunk_size="64" seq_len="2" size="8192" checksum="crc32" checksum_value="${log_crc}"/>
     </step>
 
     <disconnect resource="rs485"/>
@@ -886,6 +896,8 @@ v1 同样禁止：CAN ID 用变量、一个变量占多字节发送、位域/有
     <xs:attribute name="timeout"         type="xs:float"/>
     <xs:attribute name="drain"           type="drainEnum"/>
     <xs:attribute name="min_len"         type="xs:nonNegativeInteger"/>
+    <xs:attribute name="match_data"      type="xs:string"/>
+    <xs:attribute name="match_offset"    type="xs:nonNegativeInteger"/>
     <xs:attribute name="mode"            type="transferModeEnum"/>
     <xs:attribute name="file"            type="xs:string"/>
     <xs:attribute name="chunk_size"      type="xs:nonNegativeInteger"/>
@@ -977,7 +989,7 @@ Script(name, version, sha256, statements[])
     ├── Wait(id, id_mask?, ext, timeout?, drain=BEFORE, min_len=0, fields[],
     │         mode=single|file, file?, chunk_size?, seq_len=0, header: bytes,
     │         size?, chunks?, idle_gap?, max_size=64MiB,
-    │         checksum=none, checksum_value?)
+    │         checksum=none, checksum_value?, match_data: bytes, match_offset=0)
     │     └── Field(var, offset, length=1, endian=LITTLE, gain=1.0, bias=0.0,
     │               raw=False, unit?)
     ├── DelayStmt(ms)

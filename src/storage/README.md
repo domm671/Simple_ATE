@@ -27,6 +27,7 @@ class ResultStore(Protocol):
 ```
 
 - `RunMeta`：Run 级元信息（SN、脚本名/版本/SHA256、软件版本、工位号、开始时间）；
+- 新 Run 同时保存 `run_id`、工位配置文件的 SHA-256、工位模式、计划步数和选定的后端。`run_id` 在创建结果时生成，供 MES 对同一份结果去重；
 - `RunHandle`：一次 Run 的存储句柄，文件实现中即文件路径；
 - `RunResult`：元信息 + 结束时间 + 最终结论（PASS/FAIL/ERROR/ABORT）+ 明细列表，
   `to_dict()` 输出与结果 JSON 字段一一对应。
@@ -51,7 +52,7 @@ MES 是否启用由构造参数 `mes_enabled` 决定写入目标目录（pending
 1. `create_run()`：生成唯一名 `<SN>_<yyyyMMdd_HHmmss>.json`，写入仅含头部字段、
    `result=null`、`items=[]` 的初始文件；
 2. `append_item()`：**每完成一个 step** 读取现有 JSON、追加 item 后整体覆写；
-3. `finish_run()`：写入 `end_time` 与最终 `result`，返回完整 `RunResult`。
+3. `finish_run()` 写入 `end_time`、最终 `result` 和引擎提供的 `handle.termination_reason`，返回完整 `RunResult`。
 
 ### 4.3 防丢失设计
 

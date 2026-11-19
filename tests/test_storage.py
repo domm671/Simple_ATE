@@ -62,7 +62,9 @@ class TestFileStore(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=3) as pool:
                 paths = list(pool.map(run, range(3)))
         self.assertEqual(len(set(paths)), 3)
-        self.assertEqual(len(list((self.tmp / UPLOADED).glob("SNX_*.json"))), 3)
+        results = FileResultStore(self.tmp).iter_results(UPLOADED)
+        self.assertEqual(len(results), 3)
+        self.assertEqual(len({result.meta.run_id for result in results}), 3)
 
     def test_sn_is_kept_in_json_but_cannot_change_output_directory(self):
         store = FileResultStore(self.tmp)
@@ -80,6 +82,7 @@ class TestFileStore(unittest.TestCase):
         doc = json.loads(Path(h.path).read_text(encoding="utf-8"))
         self.assertIsNone(doc["result"])
         self.assertEqual(len(doc["items"]), 1)
+        self.assertEqual(doc["executed_steps"], 1)
         store.append_item(h, item(name="B"))
         doc = json.loads(Path(h.path).read_text(encoding="utf-8"))
         self.assertEqual(len(doc["items"]), 2)
@@ -100,6 +103,8 @@ class TestFileStore(unittest.TestCase):
         self.assertEqual(n, 1)
         doc = json.loads(Path(h.path).read_text(encoding="utf-8"))
         self.assertEqual(doc["result"], "ABORT")
+        self.assertEqual(doc["termination_reason"], "crash_recovery")
+        self.assertEqual(doc["executed_steps"], 1)
         # 再扫一次不应重复处理
         self.assertEqual(store.recover_aborted(), 0)
 
@@ -108,9 +113,13 @@ class TestFileStore(unittest.TestCase):
         directory = self.tmp / UPLOADED
         (directory / "invalid.json").write_text("[]", encoding="utf-8")
         legacy = directory / "legacy.json"
-        legacy.write_text('{"sn":"LEGACY","items":[]}', encoding="utf-8")
+        legacy.write_text('{"sn":"LEGACY","script_name":"T","script_version":"1.0","items":[]}', encoding="utf-8")
         self.assertEqual(store.recover_aborted(), 1)
         self.assertEqual(json.loads(legacy.read_text(encoding="utf-8"))["result"], "ABORT")
+        (directory / "invalid.json").unlink()
+        result, = store.iter_results(UPLOADED)
+        self.assertIsNone(result.meta.run_id)
+        self.assertEqual((result.executed_steps, result.termination_reason), (0, "crash_recovery"))
 
 
 if __name__ == "__main__":

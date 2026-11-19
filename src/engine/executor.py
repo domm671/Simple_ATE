@@ -84,20 +84,30 @@ class Engine:
     logger: logging.Logger | None = None
 
     # ------------------------------------------------------------ 资源工厂
-    def _build_resource(self, stmt: ConnectStmt) -> Communication:
-        """按 <connect> 与工位配置合并后的结果创建通信资源。
-
-        优先级：脚本 <connect> 属性 > 工位配置 [resources.xxx]；
-        protocol 未显式给出时取工位配置的 type。
-        """
-        name = stmt.resource
-        spec = self.config.resources.get(name)
+    def _resource_binding(self, stmt: ConnectStmt) -> tuple[str | None, dict[str, Any]]:
+        spec = self.config.resources.get(stmt.resource)
         options: dict[str, Any] = dict(spec.options) if spec else {}
         proto = stmt.protocol or (spec.type if spec else None)
         if spec and proto != spec.type:
             # 更换协议时必须显式启用 Mock，避免实机脚本误走工位的模拟应答。
             options.pop("mock_script", None)
         options.update(stmt.options_dict())
+        return proto, options
+
+    def _resource_backend(self, stmt: ConnectStmt) -> dict[str, str]:
+        proto, options = self._resource_binding(stmt)
+        backend = proto or "unknown"
+        if proto == "modbus":
+            backend = f"modbus_{str(options.get('modbus_mode') or 'rtu').lower()}"
+        if (proto in ("serial", "usb", "modbus") and backend != "modbus_tcp"
+                and options.get("mock_script")):
+            backend = "mock"
+        return {"resource": stmt.resource, "protocol": proto or "unknown", "backend": backend}
+
+    def _build_resource(self, stmt: ConnectStmt) -> Communication:
+        """生产资源由工位配置绑定，调试脚本可以覆盖连接参数。"""
+        name = stmt.resource
+        proto, options = self._resource_binding(stmt)
         if proto is None:
             raise CommunicationError(
                 f"资源 {name!r} 未在工位配置中定义，且 <connect> 未指定 protocol")
@@ -116,7 +126,10 @@ class Engine:
             opts["resolve_usb"] = True
             return SerialCommunication(name, **opts)
         if proto == "modbus":
-            return ModbusCommunication(name, connect_timeout=stmt.timeout,
+            connect_timeout = stmt.timeout
+            if self.config.is_production:
+                connect_timeout = options.get("connect_timeout", stmt.timeout)
+            return ModbusCommunication(name, connect_timeout=connect_timeout,
                                        **self._modbus_options(options))
         raise CommunicationError(f"未知资源类型/协议: {proto}")
 
@@ -170,6 +183,18 @@ class Engine:
             self.stop_event.clear()
 
     def _run(self, script: Script, sn: str, trace_path: str | Path | None) -> RunResult:
+        steps = [stmt for stmt in script.statements if isinstance(stmt, Step)]
+        connections = [stmt for stmt in script.statements if isinstance(stmt, ConnectStmt)]
+        if self.config.is_production:
+            if not steps or any(not step.instructions for step in steps):
+                raise ScriptParseErrors([ScriptError("生产脚本至少需要一个可执行测试步", "E108")])
+            for stmt in connections:
+                try:
+                    self.config.check_connection(
+                        stmt.resource, stmt.protocol, bool(stmt.options) or stmt.timeout != 3.0)
+                except ScriptError as exc:
+                    raise ScriptParseErrors([ScriptError(exc.message, exc.code, stmt.line)]) from exc
+
         self.extensions = ExtensionLoader(
             self.extensions_dir, self.config.extensions_allowed)
         extension_errors: list[ScriptError] = []
@@ -195,40 +220,52 @@ class Engine:
             sn=sn, script_name=script.name, script_version=script.version,
             script_sha256=script.sha256, software_version=self.config.software_version,
             station_id=self.config.station_id, start_time=start_time,
-            script_path=script.path)
+            script_path=script.path, planned_steps=len(steps), station_mode=self.config.mode,
+            station_config_sha256=self.config.config_sha256,
+            resource_backends=[self._resource_backend(stmt) for stmt in connections])
         handle = self.store.create_run(meta)
-        seq = 0
+        executed_steps = 0
 
         final_result = "PASS"
         aborted = False
+        termination_reason = "completed"
+        error_phase = "run_error"
+        manual_aborted = False
 
         try:
             self.trace = TraceLogger(trace_path) if trace_path else None
             self.listener.on_run_start(ctx, script)
-            ctx.logger.info(f"[RUN] sn={sn} script={script.name} v{script.version} started")
+            ctx.logger.info(f"[RUN] run_id={meta.run_id} mode={self.config.mode} "
+                            f"sn={sn} script={script.name} v{script.version} started")
             for stmt in script.statements:
                 if self._check_stop():
                     aborted = True
                     break
 
                 if isinstance(stmt, ConnectStmt):
+                    error_phase = "connect_error"
                     self._do_connect(ctx, stmt)
+                    error_phase = "run_error"
                 elif isinstance(stmt, DisconnectStmt):
+                    error_phase = "disconnect_error"
                     self._do_disconnect(ctx, stmt)
+                    error_phase = "run_error"
                 elif isinstance(stmt, DelayStmt):
                     self._interruptible_sleep(stmt.ms / 1000.0)
                     if self._check_stop():
                         aborted = True
                         break
                 elif isinstance(stmt, Step):
-                    seq += 1
-                    item = self._run_step(ctx, stmt, seq)
+                    item = self._run_step(ctx, stmt, executed_steps + 1)
+                    manual_aborted = item.error_code == "E310"
                     self.store.append_item(handle, item)
+                    executed_steps += 1
                     self.listener.on_step_finish(stmt, item)
 
                     if item.result == "ERROR":
                         final_result = "ERROR"
                         if stmt.on_fail == "abort":
+                            termination_reason = "step_error"
                             ctx.logger.error(
                                 f"[STEP] {stmt.name} ERROR（abort），终止测试")
                             break
@@ -236,15 +273,18 @@ class Engine:
                         if final_result != "ERROR":
                             final_result = "FAIL"
                         if stmt.on_fail == "abort":
+                            termination_reason = "step_fail"
                             ctx.logger.warning(
                                 f"[STEP] {stmt.name} FAIL（abort），终止测试")
                             break
         except RuntimeAteError as exc:
             ctx.logger.error(f"[RUN] {exc.code}: {exc.message}")
             final_result = "ERROR"
+            termination_reason = error_phase
         except Exception:  # noqa: BLE001
             ctx.logger.exception("[RUN] E303: 执行异常")
             final_result = "ERROR"
+            termination_reason = error_phase
         finally:
             # 无论正常/异常/中止，关闭所有资源
             for name, comm in list(ctx.resources.items()):
@@ -253,20 +293,30 @@ class Engine:
                     ctx.logger.info(f"[{name}] resource closed")
                 except Exception as exc:  # noqa: BLE001
                     final_result = "ERROR"
+                    if termination_reason == "completed":
+                        termination_reason = "cleanup_error"
                     ctx.logger.error(f"[{name}] E302: 关闭资源失败: {exc}")
             if self.trace:
                 try:
                     self.trace.close()
                 except OSError:
                     final_result = "ERROR"
+                    if termination_reason == "completed":
+                        termination_reason = "cleanup_error"
                     ctx.logger.exception("[RUN] E303: 关闭逐帧日志失败")
                 finally:
                     self.trace = None
 
         if aborted or self._check_stop():
             final_result = "ABORT"
+            termination_reason = "manual_judge_aborted" if manual_aborted else "stopped"
+        elif final_result == "PASS" and (not steps or executed_steps != len(steps)):
+            final_result = "ERROR"
+            termination_reason = "incomplete_plan"
+            ctx.logger.error("[RUN] E303: 没有完整执行测试计划")
 
         end_time = now_iso()
+        handle.termination_reason = termination_reason
         result = self.store.finish_run(handle, final_result, end_time)
         ctx.logger.info(f"[RUN] sn={sn} finished -> {final_result}")
         self.listener.on_run_finish(result)
@@ -317,6 +367,8 @@ class Engine:
             self.listener.on_step_start(step, attempt)
             ctx.logger.info(f"[STEP] {step.name} start (attempt {attempt}/{attempts})")
             try:
+                ctx.variables = {}
+                ctx.variable_units = {}
                 value, unit = self._run_attempt(ctx, step)
                 if self._check_stop():
                     raise TimeoutAteError("测试步被外部停止请求中断")
@@ -370,12 +422,15 @@ class Engine:
                     break
                 ctx.logger.warning(
                     f"[STEP] {step.name} {exc.code}（第 {attempt} 次尝试）：{exc.message}，重试")
-                self._interruptible_sleep(step.retry_interval)
             except Exception as exc:  # noqa: BLE001 - 未预期异常 = 引擎/扩展 bug
                 ctx.logger.exception(f"[STEP] {step.name} 未预期异常")
                 return self._item(step, seq, None, None, "ERROR",
                                   time.monotonic() - t0, attempt - 1,
                                   error_code="E303", message=f"未预期异常: {exc}")
+            finally:
+                ctx.variables.clear()
+                ctx.variable_units.clear()
+            self._interruptible_sleep(step.retry_interval)
 
         # 重试用尽 / 不可重试的运行期错误
         if last_error is None:

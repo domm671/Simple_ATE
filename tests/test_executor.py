@@ -12,6 +12,7 @@ from simple_ate.config_loader import StationConfig
 from simple_ate.engine import Engine, EngineListener
 from simple_ate.engine.model import ConnectStmt
 from simple_ate.engine.parser import ScriptParser
+from simple_ate.errors import ScriptParseErrors
 from simple_ate.storage.file_store import FileResultStore
 
 
@@ -90,6 +91,31 @@ class TestExecution(unittest.TestCase):
         self.assertAlmostEqual(r.items[0].value, 12.03)
         self.assertEqual(r.items[0].retries, 0)
 
+    def test_debug_empty_plan_is_not_pass(self):
+        result = EngineHarness({}, self.tmp).run('<test name="T" version="9.9"/>')
+        self.assertEqual((result.result, result.termination_reason), ("ERROR", "incomplete_plan"))
+        self.assertEqual((result.meta.planned_steps, result.executed_steps), (0, 0))
+
+    def test_production_preflight_blocks_script_parsed_without_station_policy(self):
+        harness = EngineHarness({"can": self.mock([])}, self.tmp)
+        harness.cfg.mode = "production"
+        # 独立解析器接受调试脚本，生产引擎仍须在建档和打开资源前拦截。
+        with self.assertRaises(ScriptParseErrors) as cm:
+            harness.run(self.XML)
+        self.assertEqual(cm.exception.errors[0].code, "E211")
+        self.assertEqual(list(harness.store.root.rglob("*.json")), [])
+
+    def test_wait_ignores_same_id_with_wrong_or_short_payload(self):
+        mock = self.mock([])
+        for data in (b"\xff", b"\x01\xcd\xff", b"\x01\xab\x07"):
+            mock.inject(Frame(id=17, data=data))
+        result = EngineHarness({"can": mock}, self.tmp).run('''
+          <test name="T" version="1.0"><connect resource="can"/>
+            <step name="S" timeout="0.1"><wait id="17" drain="off" match_offset="1" match_data="AB 07">
+              <field var="reading" offset="2"/></wait><limit value="${reading}" eq="7"/></step>
+          </test>''')
+        self.assertEqual((result.result, result.items[0].value), ("PASS", 7))
+
     def test_drain_pairs_send_and_wait_across_delay(self):
         mock = self.mock([{"request_id": 16, "response_id": 17, "response_data": "02"}])
         mock.inject(Frame(id=17, data=b"\xff"))
@@ -164,6 +190,7 @@ class TestExecution(unittest.TestCase):
         r = h.run(xml)
         self.assertEqual(r.result, "ERROR")
         self.assertEqual([i.step_name for i in r.items], ["A"])
+        self.assertEqual((r.meta.planned_steps, r.executed_steps, r.termination_reason), (2, 1, "step_error"))
 
     def test_external_stop(self):
         xml = """<test name="T" version="1.0"><connect resource="can"/>
@@ -180,6 +207,7 @@ class TestExecution(unittest.TestCase):
         r = h.run(xml)
         elapsed = time.monotonic() - t0
         self.assertEqual(r.result, "ABORT")
+        self.assertEqual(r.termination_reason, "stopped")
         # 应在数百毫秒内响应停止，而不是等满 5s timeout
         self.assertLess(elapsed, 1.0)
 
@@ -228,6 +256,11 @@ class TestExecution(unittest.TestCase):
         self.assertEqual(doc["result"], "PASS")
         self.assertEqual(doc["sn"], "SNXYZ")
         self.assertEqual(doc["items"][0]["step_name"], "Volt")
+        self.assertEqual(doc, r.to_dict())
+        self.assertEqual((doc["planned_steps"], doc["executed_steps"], doc["termination_reason"]),
+                         (1, 1, "completed"))
+        self.assertEqual(doc["resource_backends"], [{"resource": "can", "protocol": "mock", "backend": "mock"}])
+        self.assertTrue(doc["run_id"])
 
 
 class TestFieldExtractAtRuntime(unittest.TestCase):
